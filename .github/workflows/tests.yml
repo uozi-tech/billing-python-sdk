@@ -1,0 +1,193 @@
+name: Tests and Code Quality Checks
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main, dev ]
+  # Allow manual workflow triggering
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: "3.11"
+  UV_CACHE_DIR: ~/.cache/uv
+
+jobs:
+  # Code quality checks - fail fast
+  lint:
+    name: Code Quality Checks
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Install uv
+      uses: astral-sh/setup-uv@v2
+      with:
+        version: "latest"
+        enable-cache: true
+    
+    - name: Setup Python
+      run: uv python install ${{ env.PYTHON_VERSION }}
+    
+    - name: Install dependencies
+      run: uv sync --extra dev --extra test
+    
+    - name: Ruff code check
+      run: |
+        echo "Running Ruff code check..."
+        uv run ruff check src/ tests/ --output-format=github
+        
+    - name: Ruff format check
+      run: |
+        echo "Checking code format..."
+        uv run ruff format --check src/ tests/
+        
+    - name: MyPy type check
+      run: |
+        echo "Running MyPy type check..."
+        uv run mypy src/
+
+  # Unit tests - multi-platform and multi-version
+  test:
+    name: "Tests - Python ${{ matrix.python-version }} on ${{ matrix.os }}"
+    runs-on: ${{ matrix.os }}
+    needs: lint  # Only run tests after code quality checks pass
+    strategy:
+      fail-fast: false  # Continue other jobs even if one fails
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.11", "3.12"]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Install uv
+      uses: astral-sh/setup-uv@v2
+      with:
+        version: "latest"
+        enable-cache: true
+    
+    - name: Setup Python ${{ matrix.python-version }}
+      run: uv python install ${{ matrix.python-version }}
+    
+    - name: Install dependencies
+      run: uv sync --extra test
+    
+    - name: Run unit tests
+      run: uv run pytest tests/ -m "not integration" --cov=billing_sdk --cov-report=term-missing -v
+
+  # Integration tests
+  integration-test:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: test
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Install uv
+      uses: astral-sh/setup-uv@v2
+      with:
+        version: "latest"
+        enable-cache: true
+    
+    - name: Setup Python
+      run: uv python install ${{ env.PYTHON_VERSION }}
+    
+    - name: Install dependencies
+      run: uv sync --extra test
+    
+    - name: Run integration tests
+      run: uv run pytest tests/ -m integration -v --tb=short
+    
+    - name: Run example tests
+      run: uv run pytest tests/test_examples.py -v
+
+  # Build check
+  build:
+    name: Build Check
+    runs-on: ubuntu-latest
+    needs: lint
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Install uv
+      uses: astral-sh/setup-uv@v2
+      with:
+        version: "latest"
+        enable-cache: true
+    
+    - name: Setup Python
+      run: uv python install ${{ env.PYTHON_VERSION }}
+    
+    - name: Install build dependencies
+      run: uv sync --extra dev
+    
+    - name: Build package
+      run: |
+        echo "Building Python package..."
+        uv build
+        
+    - name: Check package info
+      run: |
+        echo "Checking built package..."
+        ls -la dist/
+        echo "Package build completed"
+
+  # Performance tests (optional)
+  performance:
+    name: Performance Tests
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'performance')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Install uv
+      uses: astral-sh/setup-uv@v2
+      with:
+        version: "latest"
+        enable-cache: true
+    
+    - name: Setup Python
+      run: uv python install ${{ env.PYTHON_VERSION }}
+    
+    - name: Install dependencies
+      run: uv sync --extra test
+    
+    - name: Run performance tests
+      run: |
+        echo "Running performance tests..."
+        uv run pytest tests/ --durations=10 --tb=short
+        echo "Test execution time statistics completed"
+
+  # Comprehensive status check
+  all-checks:
+    name: All Checks Complete
+    runs-on: ubuntu-latest
+    needs: [lint, test, integration-test, build]
+    if: always()
+    
+    steps:
+    - name: Check results
+      run: |
+        echo "CI/CD check results summary:"
+        echo "Code quality checks: ${{ needs.lint.result }}"
+        echo "Unit tests: ${{ needs.test.result }}"
+        echo "Integration tests: ${{ needs.integration-test.result }}"
+        echo "Build check: ${{ needs.build.result }}"
+        
+        if [[ "${{ needs.lint.result }}" != "success" || "${{ needs.test.result }}" != "success" || "${{ needs.integration-test.result }}" != "success" || "${{ needs.build.result }}" != "success" ]]; then
+          echo "Some checks failed"
+          exit 1
+        else
+          echo "All checks passed!"
+        fi 
