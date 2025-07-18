@@ -1,0 +1,193 @@
+name: 🧪 测试和代码质量检查
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main, dev ]
+  # 允许手动触发工作流
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: "3.11"
+  UV_CACHE_DIR: ~/.cache/uv
+
+jobs:
+  # 代码质量检查 - 快速失败
+  lint:
+    name: 🔍 代码质量检查
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 检出代码
+      uses: actions/checkout@v4
+    
+    - name: 🔧 安装 uv
+      uses: astral-sh/setup-uv@v2
+      with:
+        version: "latest"
+        enable-cache: true
+    
+    - name: 🐍 设置 Python
+      run: uv python install ${{ env.PYTHON_VERSION }}
+    
+    - name: 📦 安装依赖
+      run: uv sync --extra dev --extra test
+    
+    - name: 🧹 Ruff 代码检查
+      run: |
+        echo "🔍 运行 Ruff 代码检查..."
+        uv run ruff check src/ tests/ --output-format=github
+        
+    - name: 🎨 Ruff 格式化检查
+      run: |
+        echo "🎨 检查代码格式..."
+        uv run ruff format --check src/ tests/
+        
+    - name: 🔍 MyPy 类型检查
+      run: |
+        echo "🔍 运行 MyPy 类型检查..."
+        uv run mypy src/
+
+  # 单元测试 - 多平台和多版本
+  test:
+    name: 🧪 测试 (Python ${{ matrix.python-version }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: lint  # 只有代码质量检查通过后才运行测试
+    strategy:
+      fail-fast: false  # 即使一个任务失败，其他任务仍然继续
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.11", "3.12"]
+    
+    steps:
+    - name: 📥 检出代码
+      uses: actions/checkout@v4
+    
+    - name: 🔧 安装 uv
+      uses: astral-sh/setup-uv@v2
+      with:
+        version: "latest"
+        enable-cache: true
+    
+    - name: 🐍 设置 Python ${{ matrix.python-version }}
+      run: uv python install ${{ matrix.python-version }}
+    
+    - name: 📦 安装依赖
+      run: uv sync --extra test
+    
+    - name: 🧪 运行单元测试
+      run: uv run pytest tests/ -m "not integration" --cov=billing_sdk --cov-report=term-missing -vgi
+
+  # 集成测试
+  integration-test:
+    name: 🔗 集成测试
+    runs-on: ubuntu-latest
+    needs: test
+    
+    steps:
+    - name: 📥 检出代码
+      uses: actions/checkout@v4
+    
+    - name: 🔧 安装 uv
+      uses: astral-sh/setup-uv@v2
+      with:
+        version: "latest"
+        enable-cache: true
+    
+    - name: 🐍 设置 Python
+      run: uv python install ${{ env.PYTHON_VERSION }}
+    
+    - name: 📦 安装依赖
+      run: uv sync --extra test
+    
+    - name: 🔗 运行集成测试
+      run: uv run pytest tests/ -m integration -v --tb=short
+    
+    - name: 📋 运行示例测试
+      run: uv run pytest tests/test_examples.py -v
+
+  # 构建检查
+  build:
+    name: 📦 构建检查
+    runs-on: ubuntu-latest
+    needs: lint
+    
+    steps:
+    - name: 📥 检出代码
+      uses: actions/checkout@v4
+    
+    - name: 🔧 安装 uv
+      uses: astral-sh/setup-uv@v2
+      with:
+        version: "latest"
+        enable-cache: true
+    
+    - name: 🐍 设置 Python
+      run: uv python install ${{ env.PYTHON_VERSION }}
+    
+    - name: 📦 安装构建依赖
+      run: uv sync --extra dev
+    
+    - name: 🏗️ 构建包
+      run: |
+        echo "🏗️ 构建 Python 包..."
+        uv build
+        
+    - name: 📋 检查包信息
+      run: |
+        echo "📋 检查构建的包..."
+        ls -la dist/
+        echo "✅ 包构建完成"
+
+  # 性能测试（可选）
+  performance:
+    name: ⚡ 性能测试
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'performance')
+    
+    steps:
+    - name: 📥 检出代码
+      uses: actions/checkout@v4
+    
+    - name: 🔧 安装 uv
+      uses: astral-sh/setup-uv@v2
+      with:
+        version: "latest"
+        enable-cache: true
+    
+    - name: 🐍 设置 Python
+      run: uv python install ${{ env.PYTHON_VERSION }}
+    
+    - name: 📦 安装依赖
+      run: uv sync --extra test
+    
+    - name: ⚡ 运行性能测试
+      run: |
+        echo "⚡ 运行性能测试..."
+        uv run pytest tests/ --durations=10 --tb=short
+        echo "📊 测试执行时间统计完成"
+
+  # 综合状态检查
+  all-checks:
+    name: ✅ 所有检查完成
+    runs-on: ubuntu-latest
+    needs: [lint, test, integration-test, build]
+    if: always()
+    
+    steps:
+    - name: 📊 检查结果
+      run: |
+        echo "📊 CI/CD 检查结果汇总："
+        echo "代码质量检查: ${{ needs.lint.result }}"
+        echo "单元测试: ${{ needs.test.result }}"
+        echo "集成测试: ${{ needs.integration-test.result }}"
+        echo "构建检查: ${{ needs.build.result }}"
+        
+        if [[ "${{ needs.lint.result }}" != "success" || "${{ needs.test.result }}" != "success" || "${{ needs.integration-test.result }}" != "success" || "${{ needs.build.result }}" != "success" ]]; then
+          echo "❌ 部分检查失败"
+          exit 1
+        else
+          echo "✅ 所有检查都通过了！"
+        fi 

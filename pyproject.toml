@@ -1,0 +1,82 @@
+[project]
+name = "billing-python-sdk"
+version = "0.1.0"
+description = "计费系统 Python SDK，提供用量追踪和 API Key 验证功能"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "paho-mqtt>=1.6.1",
+    "asyncio-mqtt>=0.11.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.0.0",
+    "pytest-mock>=3.10.0",
+]
+dev = [
+    "ruff>=0.12.4",
+    "mypy>=1.0.0",
+    "pre-commit>=3.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+    "--asyncio-mode=auto",
+    "--cov=billing_sdk",
+    "--cov-report=term-missing",
+    "--cov-report=html",
+]
+markers = [
+    "asyncio: marks tests as async tests",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "T20"]
+ignore = ["E501"]  # 忽略行长度限制
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+strict_optional = true
+
+[[tool.mypy.overrides]]
+module = "asyncio_mqtt.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "paho.mqtt.*"
+ignore_missing_imports = true
