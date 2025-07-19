@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import ssl
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -36,7 +37,7 @@ class BillingClient:
     def __init__(
         self,
         broker_host: str,
-        broker_port: int = 1883,
+        broker_port: int = 8883,  # TLS 默认端口
         username: str | None = None,
         password: str | None = None,
         logger: logging.Logger | None = None,
@@ -49,6 +50,7 @@ class BillingClient:
         self.broker_port = broker_port
         self.username = username
         self.password = password
+
         self._client: AsyncMQTTClient | None = None
         self._is_connected = False
         # 用于缓存有效的 API keys，从 MQTT 推送中动态更新
@@ -64,6 +66,16 @@ class BillingClient:
 
         # 自动连接 MQTT
         self._auto_connect()
+
+    def _create_tls_context(self) -> ssl.SSLContext:
+        """创建默认的 TLS SSL 上下文"""
+        # 创建 SSL 上下文，默认忽略证书验证
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.check_hostname = False  # MQTT 通常不使用主机名验证
+        context.verify_mode = ssl.CERT_NONE  # 忽略证书校验
+
+        return context
 
     @classmethod
     def get_instance(cls) -> "BillingClient":
@@ -92,24 +104,32 @@ class BillingClient:
         return self._is_connected
 
     async def connect(self) -> None:
-        """连接到 MQTT 代理"""
+        """连接到 MQTT 代理（默认使用 TLS）"""
         async with self._lock:
             if self._is_connected:
                 self._logger.info("BillingClient 已经连接，跳过重复连接")
                 return
 
             try:
+                # 创建 TLS 上下文
+                tls_context = self._create_tls_context()
+
+                self._logger.info(
+                    f"使用 TLS 连接到 MQTT 代理 {self.broker_host}:{self.broker_port}"
+                )
+
+                # 直接传递参数，避免类型推断问题
                 self._client = AsyncMQTTClient(
                     hostname=self.broker_host,
                     port=self.broker_port,
                     username=self.username,
                     password=self.password,
+                    tls_context=tls_context,
                 )
                 await self._client.connect()
                 self._is_connected = True
-                self._logger.info(
-                    f"已连接到 MQTT 代理 {self.broker_host}:{self.broker_port}"
-                )
+
+                self._logger.info("已通过 TLS 连接到 MQTT 代理")
 
                 # 订阅 Key 状态更新
                 await self._client.subscribe("key-status-updates")
