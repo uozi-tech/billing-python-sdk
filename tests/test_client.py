@@ -19,7 +19,7 @@ class TestBillingClient:
         """测试单例模式"""
         # 第一次初始化
         with patch("asyncio.create_task"):
-            client1 = BillingClient("localhost", 1883)
+            client1 = BillingClient("localhost", 8883)
 
         # 第二次获取应该返回同一个实例
         with patch("asyncio.create_task"):
@@ -29,7 +29,7 @@ class TestBillingClient:
         assert client1 is client2
         # 配置应该是第一次的配置
         assert client1.broker_host == "localhost"
-        assert client1.broker_port == 1883
+        assert client1.broker_port == 8883
 
     @pytest.mark.asyncio
     async def test_get_instance_before_initialization(self):
@@ -41,7 +41,7 @@ class TestBillingClient:
     async def test_get_instance_after_initialization(self):
         """测试初始化后获取实例"""
         with patch("asyncio.create_task"):
-            original = BillingClient("localhost", 1883)
+            original = BillingClient("localhost", 8883)
 
         instance = BillingClient.get_instance()
         assert instance is original

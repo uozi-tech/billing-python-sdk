@@ -10,6 +10,7 @@
 - 🛡️ **类型安全**: 完整的类型注解和运行时检查
 - ⚡ **异步优先**: 全面支持 asyncio 和异步操作
 - 🔧 **高度可配置**: 自定义用量计算和元数据提取
+- 🔐 **默认 TLS 加密**: 默认使用 TLS 连接确保通信安全
 
 ## 前置要求
 
@@ -35,6 +36,28 @@ uv sync
 uv sync --extra dev --extra test
 ```
 
+## 安全性
+
+### TLS 加密连接
+
+SDK 默认使用 TLS 加密连接
+
+- **传输加密**: 所有 MQTT 通信都通过 TLS 1.2+ 加密
+- **自动连接**: 客户端自动使用安全连接
+
+### 连接状态监控
+
+```python
+# 检查连接状态
+if client.is_connected():
+    print("已连接到 MQTT 代理")
+else:
+    print("未连接")
+
+# 手动连接（如果需要）
+await client.connect()
+```
+
 ## 快速开始
 
 ### 1. 初始化全局单例
@@ -42,10 +65,10 @@ uv sync --extra dev --extra test
 ```python
 from billing_sdk import BillingClient
 
-# 初始化全局单例（整个应用只需要初始化一次，会自动连接 MQTT）
+# 初始化全局单例（整个应用只需要初始化一次，会自动通过 TLS 连接 MQTT）
 client = BillingClient(
     broker_host="localhost",
-    broker_port=1883,
+    broker_port=8883,  # TLS 默认端口
     username="your_username",
     password="your_password"
 )
