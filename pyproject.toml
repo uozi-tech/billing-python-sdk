@@ -1,6 +1,6 @@
 [project]
 name = "billing-python-sdk"
-version = "0.3.0"
+version = "0.4.0"
 description = "计费系统 Python SDK，提供用量追踪和 API Key 验证功能"
 readme = "README.md"
 requires-python = ">=3.11"
