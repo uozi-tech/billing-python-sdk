@@ -22,10 +22,10 @@ class TestUsageExamples:
     async def test_basic_usage_example(self):
         """基础使用示例"""
         # 1. 初始化 BillingClient（应用启动时）
-        with patch("asyncio.create_task"):
+        with patch.object(BillingClient, "_auto_connect"):
             billing_client = BillingClient(
                 broker_host="mqtt.billing.company.com",
-                broker_port=1883,
+                broker_port=8883,
                 username="billing_user",
                 password="billing_pass",
             )
@@ -69,8 +69,8 @@ class TestUsageExamples:
     @pytest.mark.asyncio
     async def test_custom_usage_calculator_example(self):
         """自定义用量计算器示例"""
-        with patch("asyncio.create_task"):
-            billing_client = BillingClient("localhost", 1883)
+        with patch.object(BillingClient, "_auto_connect"):
+            billing_client = BillingClient("localhost", 8883)
 
         mock_mqtt_client = AsyncMock()
         billing_client._client = mock_mqtt_client
@@ -170,8 +170,8 @@ class TestUsageExamples:
     @pytest.mark.asyncio
     async def test_multiple_services_example(self):
         """多个服务使用示例"""
-        with patch("asyncio.create_task"):
-            billing_client = BillingClient("localhost", 1883)
+        with patch.object(BillingClient, "_auto_connect"):
+            billing_client = BillingClient("localhost", 8883)
 
         mock_mqtt_client = AsyncMock()
         billing_client._client = mock_mqtt_client
@@ -245,8 +245,8 @@ class TestUsageExamples:
     @pytest.mark.asyncio
     async def test_error_handling_example(self):
         """错误处理示例"""
-        with patch("asyncio.create_task"):
-            billing_client = BillingClient("localhost", 1883)
+        with patch.object(BillingClient, "_auto_connect"):
+            billing_client = BillingClient("localhost", 8883)
 
         mock_mqtt_client = AsyncMock()
         billing_client._client = mock_mqtt_client
@@ -291,8 +291,8 @@ class TestUsageExamples:
     @pytest.mark.asyncio
     async def test_batch_processing_example(self):
         """批处理示例"""
-        with patch("asyncio.create_task"):
-            billing_client = BillingClient("localhost", 1883)
+        with patch.object(BillingClient, "_auto_connect"):
+            billing_client = BillingClient("localhost", 8883)
 
         mock_mqtt_client = AsyncMock()
         billing_client._client = mock_mqtt_client
@@ -365,8 +365,8 @@ class TestUsageExamples:
     @pytest.mark.asyncio
     async def test_streaming_example(self):
         """流式处理示例"""
-        with patch("asyncio.create_task"):
-            billing_client = BillingClient("localhost", 1883)
+        with patch.object(BillingClient, "_auto_connect"):
+            billing_client = BillingClient("localhost", 8883)
 
         mock_mqtt_client = AsyncMock()
         billing_client._client = mock_mqtt_client

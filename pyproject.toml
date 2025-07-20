@@ -1,12 +1,12 @@
 [project]
 name = "billing-python-sdk"
-version = "0.2.1"
+version = "0.3.0"
 description = "计费系统 Python SDK，提供用量追踪和 API Key 验证功能"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "paho-mqtt>=1.6.1",
-    "asyncio-mqtt>=0.11.0",
+    "aiomqtt>=1.0.0",
 ]
 
 [project.optional-dependencies]
@@ -74,7 +74,7 @@ check_untyped_defs = true
 strict_optional = true
 
 [[tool.mypy.overrides]]
-module = "asyncio_mqtt.*"
+module = "aiomqtt.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

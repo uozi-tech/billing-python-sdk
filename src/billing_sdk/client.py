@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from asyncio_mqtt import Client as AsyncMQTTClient
+from aiomqtt import Client as AioMQTTClient
 
 
 @dataclass
@@ -51,7 +51,7 @@ class BillingClient:
         self.username = username
         self.password = password
 
-        self._client: AsyncMQTTClient | None = None
+        self._client: AioMQTTClient | None = None
         self._is_connected = False
         # 用于缓存有效的 API keys，从 MQTT 推送中动态更新
         self._valid_keys: set[str] = set()
@@ -60,6 +60,9 @@ class BillingClient:
         self._key_status_callback: Callable | None = None
         # 使用自定义 logger 或默认 logger
         self._logger = logger or logging.getLogger(__name__)
+
+        # 消息处理任务
+        self._message_task: asyncio.Task | None = None
 
         # 标记为已初始化
         BillingClient._initialized = True
@@ -92,12 +95,26 @@ class BillingClient:
     def _auto_connect(self) -> None:
         """自动连接到 MQTT 代理（后台任务）"""
         try:
+            # 检查是否有运行中的事件循环
+            asyncio.get_running_loop()
             # 创建后台任务进行连接
-            asyncio.create_task(self.connect())
+            task = asyncio.create_task(self.connect())
+            # 添加异常处理回调
+            task.add_done_callback(self._handle_auto_connect_result)
             self._logger.info("已启动 MQTT 自动连接任务")
         except RuntimeError:
             # 如果没有运行中的事件循环，则忽略（可能在同步环境中）
-            self._logger.warning("没有运行中的事件循环，跳过自动连接")
+            self._logger.info(
+                "未检测到事件循环，请手动调用 await client.connect() 连接 MQTT"
+            )
+
+    def _handle_auto_connect_result(self, task: asyncio.Task) -> None:
+        """处理自动连接任务的结果"""
+        try:
+            task.result()
+        except Exception as e:
+            self._logger.debug(f"自动连接失败: {e}")
+            # 静默处理，用户可以手动连接
 
     def is_connected(self) -> bool:
         """检查是否已连接"""
@@ -118,33 +135,74 @@ class BillingClient:
                     f"使用 TLS 连接到 MQTT 代理 {self.broker_host}:{self.broker_port}"
                 )
 
-                # 直接传递参数，避免类型推断问题
-                self._client = AsyncMQTTClient(
+                # 创建客户端
+                self._client = AioMQTTClient(
                     hostname=self.broker_host,
                     port=self.broker_port,
                     username=self.username,
                     password=self.password,
                     tls_context=tls_context,
                 )
-                await self._client.connect()
+
+                # 启动连接
+                await self._client.__aenter__()
                 self._is_connected = True
 
                 self._logger.info("已通过 TLS 连接到 MQTT 代理")
 
                 # 订阅 Key 状态更新
-                await self._client.subscribe("key-status-updates")
-                asyncio.create_task(self._handle_messages())
+                await self._client.subscribe("billing/keys/update")
+
+                # 启动消息处理任务
+                self._message_task = asyncio.create_task(self._handle_messages())
+
+                # 首次连接后请求 Key 列表
+                await self._request_keys_list()
 
             except Exception as e:
                 self._logger.error(f"连接 MQTT 代理失败: {e}")
+                self._is_connected = False
+                self._client = None
                 raise
+
+    async def _request_keys_list(self) -> None:
+        """首次连接后请求 Key 列表"""
+        if not self._is_connected or self._client is None:
+            return
+
+        try:
+            request_message = {
+                "timestamp": int(time.time() * 1000)  # 毫秒时间戳
+            }
+
+            await self._client.publish(
+                "billing/keys/request", json.dumps(request_message)
+            )
+            self._logger.info("已发送 Key 列表请求")
+        except Exception as e:
+            self._logger.error(f"请求 Key 列表失败: {e}")
 
     async def disconnect(self) -> None:
         """断开 MQTT 连接"""
         async with self._lock:
             if self._client and self._is_connected:
-                await self._client.disconnect()
+                # 停止消息处理任务
+                if self._message_task and not self._message_task.done():
+                    self._message_task.cancel()
+                    try:
+                        await self._message_task
+                    except asyncio.CancelledError:
+                        pass
+                    self._message_task = None
+
+                # 断开连接
+                try:
+                    await self._client.__aexit__(None, None, None)
+                except Exception as e:
+                    self._logger.warning(f"断开连接时出现警告: {e}")
+
                 self._is_connected = False
+                self._client = None
                 self._logger.info("已断开 MQTT 连接")
 
     async def _handle_messages(self) -> None:
@@ -153,18 +211,20 @@ class BillingClient:
             return
 
         try:
-            async with self._client.messages() as messages:
-                async for message in messages:
-                    if message.topic.matches("key-status-updates"):
-                        payload = message.payload
-                        if isinstance(payload, bytes | bytearray):
-                            await self._handle_key_status_update(payload.decode())
-                        elif isinstance(payload, str):
-                            await self._handle_key_status_update(payload)
-                        else:
-                            self._logger.warning(
-                                f"收到不支持的 payload 类型: {type(payload)}"
-                            )
+            async for message in self._client.messages:
+                if message.topic.matches("billing/keys/update"):
+                    payload = message.payload
+                    if isinstance(payload, bytes | bytearray):
+                        await self._handle_key_status_update(payload.decode())
+                    elif isinstance(payload, str):
+                        await self._handle_key_status_update(payload)
+                    else:
+                        self._logger.warning(
+                            f"收到不支持的 payload 类型: {type(payload)}"
+                        )
+        except asyncio.CancelledError:
+            # 正常取消，不需要记录错误
+            pass
         except Exception as e:
             self._logger.error(f"处理 MQTT 消息时出错: {e}")
 
@@ -173,6 +233,11 @@ class BillingClient:
         try:
             data = json.loads(payload)
             updates = data.get("updates", [])
+            timestamp = data.get("timestamp")
+
+            self._logger.info(
+                f"收到 Key 状态更新，时间戳: {timestamp}, 更新数量: {len(updates)}"
+            )
 
             for update in updates:
                 key = update.get("key")
@@ -194,7 +259,7 @@ class BillingClient:
                     self._blocked_keys.discard(key)
                     from .decorators import _mask_api_key
 
-                    self._logger.info(f"API Key 状态恢复正常: {_mask_api_key(key)}")
+                    self._logger.info(f"API Key 状态正常: {_mask_api_key(key)}")
 
                 # 调用回调函数
                 if self._key_status_callback:
@@ -225,7 +290,7 @@ class BillingClient:
             message["metadata"] = usage_data.metadata
 
         try:
-            await self._client.publish("usage-report", json.dumps(message))
+            await self._client.publish("billing/report", json.dumps(message))
             self._logger.info(f"用量上报成功: {usage_data.model} - {usage_data.usage}")
         except Exception as e:
             self._logger.error(f"用量上报失败: {e}")
@@ -259,6 +324,10 @@ class BillingClient:
     def set_key_status_callback(self, callback: Callable) -> None:
         """设置 Key 状态变化回调函数"""
         self._key_status_callback = callback
+
+    async def request_keys_list(self) -> None:
+        """手动请求 Key 列表更新"""
+        await self._request_keys_list()
 
     def __enter__(self) -> "BillingClient":
         return self

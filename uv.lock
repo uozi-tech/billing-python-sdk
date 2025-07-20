@@ -3,22 +3,23 @@ revision = 2
 requires-python = ">=3.11"
 
 [[package]]
-name = "asyncio-mqtt"
-version = "0.16.2"
+name = "aiomqtt"
+version = "2.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "paho-mqtt" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/45/9a/863bc34c64bc4acb9720a9950bfc77d6f324640cdf1f420bb5d9ee624975/aiomqtt-2.4.0.tar.gz", hash = "sha256:ab0f18fc5b7ffaa57451c407417d674db837b00a9c7d953cccd02be64f046c17", size = 82718, upload-time = "2025-05-03T20:21:27.748Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2a/64/c8a8c2ed51f3c1f4b8d2f244424d3bad3fbd4333eb01589c6b00a6dd2c04/asyncio_mqtt-0.16.2-py3-none-any.whl", hash = "sha256:fe70ea2c648b248779a7ff3d9218262cdd739083743dfaa7c0d52ba458a8ad71", size = 17380, upload-time = "2023-06-26T19:46:48.342Z" },
+    { url = "https://files.pythonhosted.org/packages/98/0c/2720665998d97d3a9521c03b138a22247e035ba54c4738e934da33c68699/aiomqtt-2.4.0-py3-none-any.whl", hash = "sha256:721296e2b79df5f6c7c4dfc91700ae0166953a4127735c92637859619dbd84e4", size = 15908, upload-time = "2025-05-03T20:21:26.337Z" },
 ]
 
 [[package]]
 name = "billing-python-sdk"
-version = "0.1.0"
+version = "0.2.1"
 source = { editable = "." }
 dependencies = [
-    { name = "asyncio-mqtt" },
+    { name = "aiomqtt" },
     { name = "paho-mqtt" },
 ]
 
@@ -37,7 +38,7 @@ test = [
 
 [package.metadata]
 requires-dist = [
-    { name = "asyncio-mqtt", specifier = ">=0.11.0" },
+    { name = "aiomqtt", specifier = ">=1.0.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "paho-mqtt", specifier = ">=1.6.1" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.0.0" },

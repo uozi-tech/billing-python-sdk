@@ -101,7 +101,6 @@ def main():
 
     # 运行其他有用的检查
     if not args.unit and not args.integration and not args.file and not args.test:
-
         # 检查代码格式
         ruff_code = run_command(
             ["uv", "run", "ruff", "check", "src/", "tests/"], "检查代码格式 (ruff)"
