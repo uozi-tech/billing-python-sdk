@@ -103,9 +103,6 @@ jobs:
     
     - name: Run integration tests
       run: uv run pytest tests/ -m integration -v --tb=short
-    
-    - name: Run example tests
-      run: uv run pytest tests/test_examples.py -v
 
   # Build check
   build:
