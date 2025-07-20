@@ -6,10 +6,9 @@
 
 - 🚀 **单例模式**: 全局唯一的 MQTT 连接，避免资源浪费
 - 🔒 **API Key 验证**: 自动验证 gRPC metadata 中的 API Key
-- 📊 **自动用量上报**: 装饰器自动追踪和上报 API 使用量
+- 📊 **用量上报**: 使用全局 report_usage 函数上报 API 使用量
 - 🛡️ **类型安全**: 完整的类型注解和运行时检查
 - ⚡ **异步优先**: 全面支持 asyncio 和异步操作
-- 🔧 **高度可配置**: 自定义用量计算和元数据提取
 - 🔐 **默认 TLS 加密**: 默认使用 TLS 连接确保通信安全
 
 ## 前置要求
@@ -60,6 +59,34 @@ await client.connect()
 
 ## 快速开始
 
+### 简单示例
+
+```python
+from billing_sdk import BillingClient, require_api_key, report_usage_usage
+
+# 初始化全局单例
+client = BillingClient("localhost", 8883, "user", "pass")
+
+class MyService:
+    @require_api_key
+    async def my_api(self, stream, data):
+        # 业务逻辑
+        result = {"output": "processed", "tokens": 100}
+        
+        # 从 stream metadata 获取 API key
+        api_key = stream.metadata.get("api-key", "")
+        
+        # 上报用量
+        await report_usage(
+            api_key=api_key,
+            module="llm",
+            model="my-model",
+            usage=result["tokens"]
+        )
+        
+        return result
+```
+
 ### 1. 初始化全局单例
 
 ```python
@@ -74,68 +101,127 @@ client = BillingClient(
 )
 ```
 
-### 2. 使用装饰器
+### 2. 使用 API Key 验证和用量上报
 
 ```python
-from billing_sdk import track_usage, require_api_key
+from billing_sdk import require_api_key, report_usage
 
 class YourService:
     
     @require_api_key
-    @track_usage("llm", "gpt-3.5-turbo")
     async def chat_completion(self, stream, messages):
         # 你的业务逻辑
-        return {"response": "Hello, world!"}
+        result = {"response": "Hello, world!", "token_count": 100}
+        
+        # 从 stream metadata 获取 API key
+        api_key = stream.metadata.get("api-key", "")
+        
+        # 使用全局 report_usage 函数上报用量
+        await report_usage(
+            api_key=api_key,
+            module="llm",
+            model="gpt-3.5-turbo",
+            usage=result["token_count"],
+            metadata={"prompt_tokens": 50, "completion_tokens": 50}
+        )
+        
+        return result
 ```
 
-## 装饰器说明
+## API 说明
 
-### @require_api_key
+### @require_api_key 装饰器
 - 自动从 gRPC metadata 中验证 API Key
 - 支持 `api-key` 和 `apikey` 两种格式
 - 验证失败会抛出异常
-- 自动清理临时 API Key，防止内存泄漏
+- 在方法内部可以通过 `stream.metadata.get("api-key", "")` 获取 API Key
 
-### @track_usage(module, model, usage_calculator=None, metadata_extractor=None)
-- 自动上报用量到计费系统
-- `module`: 模块名称 (如 "llm", "tts", "asr")
-- `model`: 模型名称
-- `usage_calculator`: 自定义用量计算函数 (可选，必须返回 int)
-- `metadata_extractor`: 自定义元数据提取函数 (可选，必须返回 dict)
-
-## 自定义用量计算
+### report_usage 函数
+全局用量上报函数，自动使用单例 BillingClient 实例：
 
 ```python
-def calculate_tokens(args, kwargs, result) -> int:
-    """计算实际使用的 token 数量"""
-    if hasattr(result, 'usage') and 'total_tokens' in result.usage:
-        return result.usage['total_tokens']
-    return len(str(result)) // 4  # 简单估算
+async def report_usage(
+    api_key: str,
+    module: str,
+    model: str,
+    usage: int,
+    metadata: dict[str, Any] | None = None,
+) -> None
+```
 
-def extract_metadata(args, kwargs, result) -> dict:
-    """提取请求元数据"""
-    return {
-        "model_version": result.get("model", "unknown"),
-        "temperature": kwargs.get("temperature", 0.7),
-        "max_tokens": kwargs.get("max_tokens", 150),
+**参数:**
+- `api_key`: API 密钥
+- `module`: 模块名称 (如 "llm", "tts", "asr")
+- `model`: 模型名称
+- `usage`: 用量数值 (int)
+- `metadata`: 元数据字典 (可选)
+
+**示例:**
+```python
+from billing_sdk import report_usage
+
+# 直接上报用量
+await report_usage(
+    api_key="your-api-key",
+    module="llm",
+    model="gpt-4",
+    usage=150,  # token 数量
+    metadata={
+        "prompt_tokens": 100,
+        "completion_tokens": 50,
+        "temperature": 0.7
     }
+)
+```
 
-@track_usage("llm", "gpt-4", calculate_tokens, extract_metadata)
-async def your_method(self, stream, *args, **kwargs):
-    # 业务逻辑
-    pass
+### report_usage 方法
+手动上报 API 使用量到计费系统：
+
+```python
+async def report_usage(self, usage_data: UsageData) -> None
+```
+
+**参数:**
+- `usage_data`: UsageData 对象，包含以下字段：
+  - `api_key`: API 密钥
+  - `module`: 模块名称 (如 "llm", "tts", "asr")
+  - `model`: 模型名称
+  - `usage`: 用量数值 (int)
+  - `metadata`: 元数据字典 (可选)
+
+**示例:**
+```python
+from billing_sdk import UsageData
+
+# 创建用量数据
+usage_data = UsageData(
+    api_key="your-api-key",
+    module="llm",
+    model="gpt-4",
+    usage=150,  # token 数量
+    metadata={
+        "prompt_tokens": 100,
+        "completion_tokens": 50,
+        "temperature": 0.7
+    }
+)
+
+# 上报用量
+client = get_billing_client()
+if client:
+    await client.report_usage(usage_data)
 ```
 
 ## 完整示例
 
 ```python
 import asyncio
-from billing_sdk import BillingClient, track_usage, require_api_key
+from billing_sdk import BillingClient, require_api_key, report_usage
 
 # 初始化全局单例
-BillingClient(
+client = BillingClient(
     broker_host="localhost",
-    broker_port=1883,
+    broker_port=8883,  # TLS 端口
     username="billing_user",
     password="billing_pass"
 )
@@ -143,13 +229,29 @@ BillingClient(
 class LLMService:
     
     @require_api_key
-    @track_usage("llm", "gpt-3.5-turbo")
     async def chat_completion(self, stream, messages):
         # 模拟处理
         await asyncio.sleep(0.1)
-        return {"content": "Hello from AI", "token_count": 100}
+        result = {"content": "Hello from AI", "token_count": 100}
+        
+        # 从 stream metadata 获取 API key
+        api_key = stream.metadata.get("api-key", "")
+        
+        # 使用全局 report_usage 函数上报用量
+        await report_usage(
+            api_key=api_key,
+            module="llm",
+            model="gpt-3.5-turbo",
+            usage=result["token_count"],
+            metadata={"prompt_length": len(str(messages))}
+        )
+        
+        return result
 
 async def main():
+    # 等待连接建立
+    await client.connect()
+    
     # 使用服务
     service = LLMService()
     
@@ -186,38 +288,108 @@ if client:
 ### 多服务集成
 
 ```python
+from billing_sdk import require_api_key, report_usage
+
 # LLM 服务
 class LLMService:
     @require_api_key
-    @track_usage("llm", "gpt-4")
-    async def generate_text(self, stream, prompt): pass
+    async def generate_text(self, stream, prompt):
+        result = {"text": f"Generated: {prompt}", "tokens": len(prompt) + 20}
+        
+        # 从 stream metadata 获取 API key
+        api_key = stream.metadata.get("api-key", "")
+        
+        # 上报用量
+        await report_usage(
+            api_key=api_key,
+            module="llm",
+            model="gpt-4",
+            usage=result["tokens"]
+        )
+        return result
 
 # TTS 服务
 class TTSService:
     @require_api_key
-    @track_usage("tts", "eleven-labs", lambda args, kwargs, result: len(args[1]))
-    async def synthesize(self, stream, text): pass
+    async def synthesize(self, stream, text):
+        result = {"audio": f"<audio_data>", "duration": len(text) * 0.1}
+        
+        # 从 stream metadata 获取 API key
+        api_key = stream.metadata.get("api-key", "")
+        
+        # 基于文本长度计算用量
+        await report_usage(
+            api_key=api_key,
+            module="tts",
+            model="eleven-labs",
+            usage=len(text),  # 以字符数为用量单位
+            metadata={"text_length": len(text), "duration": result["duration"]}
+        )
+        return result
 
 # ASR 服务
 class ASRService:
     @require_api_key
-    @track_usage("asr", "whisper")
-    async def transcribe(self, stream, audio): pass
+    async def transcribe(self, stream, audio_file):
+        result = {"text": "转录的文本内容", "duration": 30, "confidence": 0.95}
+        
+        # 从 stream metadata 获取 API key
+        api_key = stream.metadata.get("api-key", "")
+        
+        # 基于音频时长计算用量
+        await report_usage(
+            api_key=api_key,
+            module="asr",
+            model="whisper",
+            usage=int(result["duration"]),  # 以秒为用量单位
+            metadata={"confidence": result["confidence"], "file": audio_file}
+        )
+        return result
 ```
 
 ### 错误处理
 
 ```python
+import logging
+
 class RobustService:
     @require_api_key
-    @track_usage("llm", "gpt-4")
     async def safe_operation(self, stream, data):
+        # 从 stream metadata 获取 API key
+        api_key = stream.metadata.get("api-key", "")
+        usage_reported = False
+        
         try:
             # 业务逻辑
-            return process_data(data)
+            result = process_data(data)
+            
+            # 成功时上报用量
+            await report_usage(
+                api_key=api_key,
+                module="processing",
+                model="data-processor",
+                usage=len(str(result)),
+                metadata={"status": "success"}
+            )
+            usage_reported = True
+            
+            return result
+            
         except Exception as e:
-            # 即使出错，用量也会被正确上报
-            logger.error(f"处理失败: {e}")
+            # 即使出错，也要上报用量（避免免费使用）
+            if not usage_reported:
+                try:
+                    await report_usage(
+                        api_key=api_key,
+                        module="processing",
+                        model="data-processor",
+                        usage=1,  # 最小用量
+                        metadata={"status": "error", "error": str(e)}
+                    )
+                except Exception as report_error:
+                    logging.error(f"用量上报失败: {report_error}")
+            
+            logging.error(f"处理失败: {e}")
             raise
 ```
 
@@ -304,13 +476,11 @@ billing-python-sdk/
 ├── src/
 │   └── billing_sdk/
 │       ├── __init__.py          # 公共接口
-│       ├── client.py            # BillingClient 和 UsageData
+│       ├── client.py            # BillingClient、UsageData 和 report_usage 函数
 │       └── decorators.py        # 装饰器实现
 ├── tests/
 │   ├── test_client.py           # 客户端测试
 │   ├── test_decorators.py       # 装饰器测试
-│   ├── test_integration.py      # 集成测试
-│   ├── test_examples.py         # 使用示例测试
 │   └── README.md               # 测试文档
 ├── pyproject.toml              # 项目配置
 ├── uv.lock                     # 锁定的依赖版本

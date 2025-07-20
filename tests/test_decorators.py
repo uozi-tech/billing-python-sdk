@@ -1,16 +1,16 @@
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import pytest
 
-from billing_sdk import BillingClient, UsageData
+from billing_sdk import BillingClient
 from billing_sdk.decorators import (
     _mask_api_key,
     get_billing_client,
     require_api_key,
-    track_usage,
 )
 
 
+@pytest.mark.unit
 class TestDecorators:
     """装饰器测试类"""
 
@@ -45,232 +45,7 @@ class TestDecorators:
         assert client is original
 
 
-class TestTrackUsageDecorator:
-    """track_usage 装饰器测试类"""
-
-    def setup_method(self):
-        """每个测试方法前重置单例状态"""
-        BillingClient._instance = None
-        BillingClient._initialized = False
-
-    @pytest.mark.asyncio
-    async def test_track_usage_async_success(self):
-        """测试异步函数用量追踪成功"""
-        # 初始化 billing client
-        with patch.object(BillingClient, "_auto_connect"):
-            client = BillingClient("localhost", 8883)
-
-        # Mock 连接状态
-        client._is_connected = True
-        mock_report_usage = AsyncMock()
-        client.report_usage = mock_report_usage
-
-        class TestService:
-            def __init__(self):
-                self._billing_api_key = "test_key"
-
-            @track_usage("llm", "gpt-4")
-            async def call_api(self, prompt):
-                return {"result": "success", "tokens": 100}
-
-        service = TestService()
-        result = await service.call_api("Hello")
-
-        # 验证原函数返回值
-        assert result == {"result": "success", "tokens": 100}
-
-        # 验证用量上报被调用
-        mock_report_usage.assert_called_once()
-        usage_data = mock_report_usage.call_args[0][0]
-        assert isinstance(usage_data, UsageData)
-        assert usage_data.api_key == "test_key"
-        assert usage_data.module == "llm"
-        assert usage_data.model == "gpt-4"
-        assert usage_data.usage == 1  # 默认用量
-
-    @pytest.mark.asyncio
-    async def test_track_usage_async_with_calculator(self):
-        """测试带用量计算器的异步函数"""
-        # 初始化 billing client
-        with patch.object(BillingClient, "_auto_connect"):
-            client = BillingClient("localhost", 8883)
-
-        client._is_connected = True
-        mock_report_usage = AsyncMock()
-        client.report_usage = mock_report_usage
-
-        def calculate_usage(args, kwargs, result) -> int:
-            return result.get("tokens", 1)
-
-        def extract_metadata(args, kwargs, result) -> dict:
-            prompt = args[0] if len(args) > 0 else kwargs.get("prompt", "")
-            return {"prompt_length": len(prompt)}
-
-        class TestService:
-            def __init__(self):
-                self._billing_api_key = "test_key"
-
-            @track_usage("llm", "gpt-4", calculate_usage, extract_metadata)
-            async def call_api(self, prompt):
-                return {"result": "success", "tokens": 150}
-
-        service = TestService()
-        await service.call_api("Hello World")
-
-        # 验证用量上报
-        mock_report_usage.assert_called_once()
-        usage_data = mock_report_usage.call_args[0][0]
-        assert usage_data.usage == 150
-        assert usage_data.metadata == {"prompt_length": 11}
-
-    @pytest.mark.asyncio
-    async def test_track_usage_async_no_api_key(self):
-        """测试无 API Key 时的异步函数"""
-        with patch.object(BillingClient, "_auto_connect"):
-            client = BillingClient("localhost", 8883)
-
-        client._is_connected = True
-        mock_report_usage = AsyncMock()
-        client.report_usage = mock_report_usage
-
-        class TestService:
-            @track_usage("llm", "gpt-4")
-            async def call_api(self, prompt):
-                return {"result": "success"}
-
-        service = TestService()
-        result = await service.call_api("Hello")
-
-        # 函数应该正常执行
-        assert result == {"result": "success"}
-        # 但不应该上报用量
-        mock_report_usage.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_track_usage_async_no_billing_client(self):
-        """测试无 billing client 时的异步函数"""
-
-        class TestService:
-            def __init__(self):
-                self._billing_api_key = "test_key"
-
-            @track_usage("llm", "gpt-4")
-            async def call_api(self, prompt):
-                return {"result": "success"}
-
-        service = TestService()
-        result = await service.call_api("Hello")
-
-        # 函数应该正常执行
-        assert result == {"result": "success"}
-
-    @pytest.mark.asyncio
-    async def test_track_usage_async_report_failure(self):
-        """测试上报失败时的异步函数"""
-        with patch.object(BillingClient, "_auto_connect"):
-            client = BillingClient("localhost", 8883)
-
-        client._is_connected = True
-        # 停用消息处理任务避免警告
-        client._message_task = None
-        mock_report_usage = AsyncMock(side_effect=Exception("Report failed"))
-        client.report_usage = mock_report_usage
-
-        class TestService:
-            def __init__(self):
-                self._billing_api_key = "test_key"
-
-            @track_usage("llm", "gpt-4")
-            async def call_api(self, prompt):
-                return {"result": "success"}
-
-        service = TestService()
-        # 即使上报失败，函数也应该正常执行
-        result = await service.call_api("Hello")
-        assert result == {"result": "success"}
-
-    def test_track_usage_sync_success(self):
-        """测试同步函数的用量追踪（成功）"""
-
-        class TestService:
-            def __init__(self):
-                self._billing_api_key = "test_key"
-
-            @track_usage("llm", "gpt-4")
-            def call_api(self, prompt):
-                return {"result": "success"}
-
-        # 创建mock来捕获report_usage调用
-        mock_report_usage = AsyncMock()
-
-        with (
-            patch.object(BillingClient, "_auto_connect"),
-            patch("asyncio.create_task") as mock_create_task,
-        ):
-            # 初始化客户端
-            client = BillingClient("localhost", 8883)
-            client._is_connected = True
-            client.report_usage = mock_report_usage
-
-            service = TestService()
-            result = service.call_api("Hello")
-
-            # 验证函数正常执行
-            assert result == {"result": "success"}
-            # 验证创建了异步任务进行上报
-            mock_create_task.assert_called()
-
-    def test_track_usage_invalid_usage_calculator(self):
-        """测试无效的用量计算器"""
-        with patch.object(BillingClient, "_auto_connect"):
-            client = BillingClient("localhost", 8883)
-
-        client._is_connected = True
-        # 使用Mock而不是AsyncMock避免协程警告
-        mock_report_usage = Mock()
-        client.report_usage = mock_report_usage
-
-        def invalid_calculator(args, kwargs, result) -> str:  # 返回错误类型
-            return "not_an_int"
-
-        class TestService:
-            def __init__(self):
-                self._billing_api_key = "test_key"
-
-            @track_usage("llm", "gpt-4", invalid_calculator)
-            def call_api(self, prompt):
-                return {"result": "success"}
-
-        service = TestService()
-        service.call_api("Hello")
-
-    def test_track_usage_calculator_exception(self):
-        """测试用量计算器抛出异常"""
-        with patch.object(BillingClient, "_auto_connect"):
-            client = BillingClient("localhost", 8883)
-
-        client._is_connected = True
-        # 使用Mock而不是AsyncMock
-        mock_report_usage = Mock()
-        client.report_usage = mock_report_usage
-
-        def failing_calculator(args, kwargs, result) -> int:
-            raise Exception("Calculator failed")
-
-        class TestService:
-            def __init__(self):
-                self._billing_api_key = "test_key"
-
-            @track_usage("llm", "gpt-4", failing_calculator)
-            def call_api(self, prompt):
-                return {"result": "success"}
-
-        service = TestService()
-        result = service.call_api("Hello")
-        # 函数应该正常执行，使用默认用量
-        assert result == {"result": "success"}
-
-
+@pytest.mark.unit
 class TestRequireApiKeyDecorator:
     """require_api_key 装饰器测试类"""
 
@@ -388,9 +163,10 @@ class TestRequireApiKeyDecorator:
             class TestService:
                 @require_api_key
                 async def protected_method(self, stream):
-                    # 验证 API key 在执行期间存在
-                    assert hasattr(self, "_billing_api_key")
-                    assert self._billing_api_key == "valid_key"
+                    # 验证可以从 stream metadata 获取 API key
+                    metadata = dict(stream.metadata)
+                    api_key = metadata.get("api-key")
+                    assert api_key == "valid_key"
                     return "success"
 
             mock_stream = Mock()
@@ -400,10 +176,8 @@ class TestRequireApiKeyDecorator:
             ]
 
             service = TestService()
-            await service.protected_method(mock_stream)
-
-            # 验证 API key 被清理
-            assert not hasattr(service, "_billing_api_key")
+            result = await service.protected_method(mock_stream)
+            assert result == "success"
 
     @pytest.mark.asyncio
     async def test_require_api_key_exception_cleanup(self):
@@ -429,8 +203,8 @@ class TestRequireApiKeyDecorator:
         with pytest.raises(Exception, match="Method failed"):
             await service.protected_method(mock_stream)
 
-        # 即使有异常，API key 也应该被清理
-        assert not hasattr(service, "_billing_api_key")
+        # 验证异常正常抛出，方法执行失败
+        # 装饰器不再保存 API key 到对象中
 
     @pytest.mark.asyncio
     async def test_require_api_key_alternative_header(self):

@@ -3,9 +3,10 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from billing_sdk import BillingClient, UsageData
+from billing_sdk import BillingClient, UsageData, report_usage
 
 
+@pytest.mark.unit
 class TestBillingClient:
     """BillingClient 测试类"""
 
@@ -262,8 +263,8 @@ class TestBillingClient:
         client._valid_keys.add("valid-key")
         assert client.is_key_valid("valid-key")
 
-        # 测试未知Key（应该默认为有效）
-        assert client.is_key_valid("unknown-key")
+        # 测试未知Key（应该默认为无效）
+        assert not client.is_key_valid("unknown-key")
 
     @pytest.mark.asyncio
     async def test_handle_key_status_update_blocked(self):
@@ -340,3 +341,77 @@ class TestBillingClient:
         blocked_keys = client.get_blocked_keys()
         assert blocked_keys == {"blocked1", "blocked2"}
         assert blocked_keys is not client._blocked_keys  # 应该是副本
+
+
+@pytest.mark.unit
+class TestReportUsageFunction:
+    """report_usage 函数测试类"""
+
+    def setup_method(self):
+        """每个测试方法前重置单例状态"""
+        BillingClient._instance = None
+        BillingClient._initialized = False
+
+    @pytest.mark.asyncio
+    async def test_report_usage_global_success(self):
+        """测试全局 report_usage 函数成功上报"""
+        # 初始化 billing client
+        with patch.object(BillingClient, "_auto_connect"):
+            client = BillingClient("localhost", 8883)
+
+        # Mock 连接状态和 report_usage 方法
+        client._is_connected = True
+        mock_report_usage = AsyncMock()
+        client.report_usage = mock_report_usage
+
+        # 调用 report 函数
+        await report_usage(
+            api_key="test-key",
+            module="llm",
+            model="gpt-4",
+            usage=100,
+            metadata={"test": "data"},
+        )
+
+        # 验证 report_usage 被调用
+        mock_report_usage.assert_called_once()
+        usage_data = mock_report_usage.call_args[0][0]
+        assert isinstance(usage_data, UsageData)
+        assert usage_data.api_key == "test-key"
+        assert usage_data.module == "llm"
+        assert usage_data.model == "gpt-4"
+        assert usage_data.usage == 100
+        assert usage_data.metadata == {"test": "data"}
+
+    @pytest.mark.asyncio
+    async def test_report_usage_not_initialized(self):
+        """测试全局 report_usage 在 BillingClient 未初始化时的错误"""
+        with pytest.raises(RuntimeError, match="BillingClient 尚未初始化"):
+            await report_usage("test-key", "llm", "gpt-4", 100)
+
+    @pytest.mark.asyncio
+    async def test_report_usage_not_connected(self):
+        """测试全局 report_usage 在 BillingClient 未连接时的错误"""
+        with patch.object(BillingClient, "_auto_connect"):
+            BillingClient("localhost", 8883)
+
+        with pytest.raises(RuntimeError, match="BillingClient 未连接"):
+            await report_usage("test-key", "llm", "gpt-4", 100)
+
+    @pytest.mark.asyncio
+    async def test_report_usage_minimal_params(self):
+        """测试全局 report_usage 函数最小参数"""
+        with patch.object(BillingClient, "_auto_connect"):
+            client = BillingClient("localhost", 8883)
+
+        client._is_connected = True
+        mock_report_usage = AsyncMock()
+        client.report_usage = mock_report_usage
+
+        # 只使用必需参数
+        await report_usage("test-key", "llm", "gpt-4", 100)
+
+        # 验证调用
+        mock_report_usage.assert_called_once()
+        usage_data = mock_report_usage.call_args[0][0]
+        assert usage_data.metadata is None

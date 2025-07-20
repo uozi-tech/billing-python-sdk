@@ -298,20 +298,7 @@ class BillingClient:
 
     def is_key_valid(self, api_key: str) -> bool:
         """检查 API Key 是否有效"""
-        # 如果在阻止列表中，直接返回 False
-        if api_key in self._blocked_keys:
-            return False
-
-        # 如果在有效列表中，返回 True
-        if api_key in self._valid_keys:
-            return True
-
-        # 如果是未知的 key，先假设有效，等待 MQTT 推送更新状态
-        # 这样可以支持新的 key 在第一次使用时不会被立即拒绝
-        from .decorators import _mask_api_key
-
-        self._logger.info(f"未知 API Key 首次使用: {_mask_api_key(api_key)}, 假设有效")
-        return True
+        return api_key in self._valid_keys
 
     def get_valid_keys(self) -> set[str]:
         """获取当前有效的 API Keys"""
@@ -335,3 +322,41 @@ class BillingClient:
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         if self._is_connected:
             asyncio.create_task(self.disconnect())
+
+
+async def report_usage(
+    api_key: str,
+    module: str,
+    model: str,
+    usage: int,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """
+    全局用量上报函数，自动使用单例 BillingClient 实例
+
+    Args:
+        api_key: API 密钥
+        module: 模块名称 (如 "llm", "tts", "asr")
+        model: 模型名称
+        usage: 用量数值
+        metadata: 元数据字典 (可选)
+
+    Raises:
+        RuntimeError: 当 BillingClient 未初始化或未连接时
+    """
+    client = BillingClient.get_instance()
+    if not client:
+        raise RuntimeError("BillingClient 尚未初始化，请先初始化 BillingClient")
+
+    if not client.is_connected():
+        raise RuntimeError("BillingClient 未连接，请先调用 connect() 方法")
+
+    usage_data = UsageData(
+        api_key=api_key,
+        module=module,
+        model=model,
+        usage=usage,
+        metadata=metadata,
+    )
+
+    await client.report_usage(usage_data)

@@ -1,10 +1,9 @@
-import asyncio
 import functools
 import logging
 from collections.abc import Callable
 from typing import Any
 
-from .client import BillingClient, UsageData
+from .client import BillingClient
 
 logger = logging.getLogger(__name__)
 
@@ -22,168 +21,6 @@ def _get_billing_client() -> BillingClient | None:
     if BillingClient.is_initialized():
         return BillingClient.get_instance()
     return None
-
-
-def _handle_usage_reporting(
-    self: Any,
-    func: Callable,
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any],
-    result: Any,
-    module: str,
-    model: str,
-    usage_calculator: Callable[..., int] | None = None,
-    metadata_extractor: Callable[..., dict[str, Any]] | None = None,
-) -> UsageData | None:
-    """处理用量上报的共同逻辑"""
-    # 获取全局单例 billing client 和 logger
-    billing_client = _get_billing_client()
-    logger = billing_client._logger if billing_client else logging.getLogger(__name__)
-
-    # 获取 API key
-    api_key = getattr(self, "_billing_api_key", None)
-    if not api_key:
-        logger.warning(f"无法获取 API Key，跳过用量上报: {func.__name__}")
-        return None
-
-    # 计算用量
-    usage = 1  # 默认用量
-    if usage_calculator:
-        try:
-            calculated_usage = usage_calculator(args, kwargs, result)
-            # 确保返回值是 int 类型
-            if not isinstance(calculated_usage, int):
-                logger.error(
-                    f"用量计算函数必须返回 int 类型，实际返回: {type(calculated_usage)}"
-                )
-                usage = 1  # 使用默认值
-            else:
-                usage = calculated_usage
-        except Exception as e:
-            logger.error(f"用量计算失败: {e}")
-
-    # 提取元数据
-    metadata = {}
-    if metadata_extractor:
-        try:
-            extracted_metadata = metadata_extractor(args, kwargs, result)
-            # 确保返回值是字典类型
-            if not isinstance(extracted_metadata, dict):
-                logger.error(
-                    f"元数据提取函数必须返回 dict 类型，实际返回: {type(extracted_metadata)}"
-                )
-                metadata = {}
-            else:
-                metadata = extracted_metadata
-        except Exception as e:
-            logger.error(f"元数据提取失败: {e}")
-
-    # 检查 billing client 并准备上报数据
-    if billing_client and isinstance(billing_client, BillingClient):
-        return UsageData(
-            api_key=api_key,
-            module=module,
-            model=model,
-            usage=usage,
-            metadata=metadata,
-        )
-    else:
-        logger.warning("BillingClient 单例未初始化，跳过用量上报")
-        return None
-
-
-def track_usage(
-    module: str,
-    model: str,
-    usage_calculator: Callable[..., int] | None = None,
-    metadata_extractor: Callable[..., dict[str, Any]] | None = None,
-) -> Callable:
-    """
-    用量追踪装饰器，自动上报API调用的用量信息
-
-    Args:
-        module: 模块名称 (llm/tts/asr)
-        model: 模型名称
-        usage_calculator: 用量计算函数，接收函数参数和返回值，返回 int 类型的用量数值
-        metadata_extractor: 元数据提取函数，接收函数参数和返回值，返回 Dict[str, Any] 类型的元数据字典
-    """
-
-    def decorator(func: Callable) -> Callable:
-        @functools.wraps(func)
-        async def async_wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
-            # 执行原函数
-            result = await func(self, *args, **kwargs)
-
-            billing_client = _get_billing_client()
-
-            # 处理用量上报
-            usage_data = _handle_usage_reporting(
-                self,
-                func,
-                args,
-                kwargs,
-                result,
-                module,
-                model,
-                usage_calculator,
-                metadata_extractor,
-            )
-            if usage_data and billing_client:
-                try:
-                    await billing_client.report_usage(usage_data)
-                except Exception as e:
-                    # 使用全局单例的 logger 记录错误
-                    logger = (
-                        billing_client._logger
-                        if billing_client
-                        else logging.getLogger(__name__)
-                    )
-                    logger.error(f"用量上报失败: {e}")
-
-            return result
-
-        @functools.wraps(func)
-        def sync_wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
-            # 执行原函数
-            result = func(self, *args, **kwargs)
-
-            # 处理用量上报
-            usage_data = _handle_usage_reporting(
-                self,
-                func,
-                args,
-                kwargs,
-                result,
-                module,
-                model,
-                usage_calculator,
-                metadata_extractor,
-            )
-            if usage_data:
-                try:
-                    # 异步上报用量
-                    billing_client = _get_billing_client()
-                    if billing_client:
-                        asyncio.create_task(billing_client.report_usage(usage_data))
-                except Exception as e:
-                    # 使用全局单例的 logger 记录错误
-                    billing_client = _get_billing_client()
-                    logger = (
-                        billing_client._logger
-                        if billing_client
-                        else logging.getLogger(__name__)
-                    )
-                    logger.error(f"用量上报失败: {e}")
-
-            return result
-
-        # 根据原函数是否为协程返回相应的wrapper
-        if asyncio.iscoroutinefunction(func):
-            return async_wrapper
-        else:
-            return sync_wrapper
-
-    return decorator
 
 
 def require_api_key(func: Callable) -> Callable:
@@ -232,19 +69,12 @@ def require_api_key(func: Callable) -> Callable:
                 f"BillingClient 单例未初始化，跳过 API Key 验证 - 方法: {method_name}, SessionID: {session_id}"
             )
 
-        # API key 验证成功，保存当前 API key 用于用量上报
-        self._billing_api_key = api_key
         masked_key = _mask_api_key(api_key)
         logger.info(
             f"API Key 验证成功 - 方法: {method_name}, SessionID: {session_id}, API Key: {masked_key}"
         )
 
-        try:
-            return await func(self, stream, *args, **kwargs)
-        finally:
-            # 清理当前API key
-            if hasattr(self, "_billing_api_key"):
-                delattr(self, "_billing_api_key")
+        return await func(self, stream, *args, **kwargs)
 
     return wrapper
 
