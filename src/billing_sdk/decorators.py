@@ -5,8 +5,6 @@ from typing import Any
 
 from .client import BillingClient
 
-logger = logging.getLogger(__name__)
-
 
 def _mask_api_key(api_key: str) -> str:
     """掩码API Key，只显示前8位"""

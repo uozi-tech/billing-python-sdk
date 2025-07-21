@@ -3,6 +3,7 @@ import json
 import logging
 import ssl
 import time
+from asyncio import Queue
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -50,6 +51,7 @@ class BillingClient:
         self.broker_port = broker_port
         self.username = username
         self.password = password
+        self.keepalive_interval = 10  # 固定保活检查间隔为 10 秒
 
         self._client: AioMQTTClient | None = None
         self._is_connected = False
@@ -61,8 +63,16 @@ class BillingClient:
         # 使用自定义 logger 或默认 logger
         self._logger = logger or logging.getLogger(__name__)
 
-        # 消息处理任务
+        # 异步队列用于缓存上报数据（无限大小）
+        self._usage_queue: Queue[UsageData] = Queue()
+
+        # 后台任务
         self._message_task: asyncio.Task | None = None
+        self._keepalive_task: asyncio.Task | None = None
+        self._queue_consumer_task: asyncio.Task | None = None
+
+        # 控制任务运行的标志
+        self._should_stop = False
 
         # 标记为已初始化
         BillingClient._initialized = True
@@ -153,8 +163,8 @@ class BillingClient:
                 # 订阅 Key 状态更新
                 await self._client.subscribe("billing/keys/update")
 
-                # 启动消息处理任务
-                self._message_task = asyncio.create_task(self._handle_messages())
+                # 启动后台任务
+                await self._start_background_tasks()
 
                 # 首次连接后请求 Key 列表
                 await self._request_keys_list()
@@ -182,19 +192,153 @@ class BillingClient:
         except Exception as e:
             self._logger.error(f"请求 Key 列表失败: {e}")
 
+    async def _start_background_tasks(self) -> None:
+        """启动所有后台任务"""
+        self._should_stop = False
+
+        # 启动消息处理任务
+        self._message_task = asyncio.create_task(self._handle_messages())
+
+        # 启动连接保活任务
+        self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+
+        # 启动队列消费者任务
+        self._queue_consumer_task = asyncio.create_task(self._queue_consumer_loop())
+
+        self._logger.info("所有后台任务已启动")
+
+    async def _stop_background_tasks(self) -> None:
+        """停止所有后台任务"""
+        self._should_stop = True
+
+        # 停止所有任务
+        tasks = [self._message_task, self._keepalive_task, self._queue_consumer_task]
+        for task in tasks:
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+        # 重置任务引用
+        self._message_task = None
+        self._keepalive_task = None
+        self._queue_consumer_task = None
+
+        self._logger.info("所有后台任务已停止")
+
+    async def _keepalive_loop(self) -> None:
+        """MQTT连接保活循环"""
+        self._logger.info(f"连接保活任务启动，检查间隔: {self.keepalive_interval}秒")
+
+        while not self._should_stop:
+            try:
+                await asyncio.sleep(self.keepalive_interval)
+
+                if self._should_stop:
+                    break
+
+                # 检查连接状态
+                if not self._is_connected or self._client is None:
+                    self._logger.warning("检测到连接断开，尝试重新连接...")
+                    try:
+                        await self.connect()
+                    except Exception as e:
+                        self._logger.error(f"重新连接失败: {e}")
+                        continue
+
+                # 发送心跳消息
+                try:
+                    if self._client and self._is_connected:
+                        heartbeat_msg = {
+                            "type": "heartbeat",
+                            "timestamp": int(time.time() * 1000),
+                        }
+                        await self._client.publish(
+                            "billing/heartbeat", json.dumps(heartbeat_msg)
+                        )
+                        self._logger.debug("发送心跳消息")
+                except Exception as e:
+                    self._logger.warning(f"发送心跳消息失败: {e}")
+                    self._is_connected = False
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self._logger.error(f"保活循环异常: {e}")
+                await asyncio.sleep(5)  # 异常后等待5秒再继续
+
+        self._logger.info("连接保活任务已停止")
+
+    async def _queue_consumer_loop(self) -> None:
+        """队列消费者循环"""
+        self._logger.info("队列消费者任务启动")
+
+        while not self._should_stop:
+            try:
+                # 等待队列中的数据，设置超时避免阻塞
+                try:
+                    usage_data = await asyncio.wait_for(
+                        self._usage_queue.get(), timeout=1.0
+                    )
+                except TimeoutError:
+                    continue
+
+                # 确保连接存在
+                if not self._is_connected or self._client is None:
+                    # 如果连接断开，将数据放回队列头部
+                    await self._usage_queue.put(usage_data)
+                    await asyncio.sleep(1)
+                    continue
+
+                # 发送数据
+                try:
+                    await self._send_usage_data(usage_data)
+                    self._usage_queue.task_done()
+                    self._logger.debug(
+                        f"成功上报用量: {usage_data.model} - {usage_data.usage}"
+                    )
+                except Exception as e:
+                    # 发送失败，将数据放回队列
+                    await self._usage_queue.put(usage_data)
+                    self._usage_queue.task_done()
+                    self._logger.error(f"上报用量失败: {e}")
+                    await asyncio.sleep(1)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self._logger.error(f"队列消费者循环异常: {e}")
+                await asyncio.sleep(1)
+
+        self._logger.info("队列消费者任务已停止")
+
+    async def _send_usage_data(self, usage_data: UsageData) -> None:
+        """实际发送用量数据到MQTT"""
+        if not self._is_connected or self._client is None:
+            raise RuntimeError("未连接到 MQTT 代理")
+
+        message = {
+            "api_key": usage_data.api_key,
+            "module": usage_data.module,
+            "model": usage_data.model,
+            "usage": usage_data.usage,
+            "timestamp": int(time.time() * 1000),  # 毫秒时间戳
+        }
+
+        if usage_data.metadata:
+            message["metadata"] = usage_data.metadata
+
+        await self._client.publish("billing/report", json.dumps(message))
+
     async def disconnect(self) -> None:
         """断开 MQTT 连接"""
         async with self._lock:
-            if self._client and self._is_connected:
-                # 停止消息处理任务
-                if self._message_task and not self._message_task.done():
-                    self._message_task.cancel()
-                    try:
-                        await self._message_task
-                    except asyncio.CancelledError:
-                        pass
-                    self._message_task = None
+            # 停止所有后台任务
+            await self._stop_background_tasks()
 
+            if self._client and self._is_connected:
                 # 断开连接
                 try:
                     await self._client.__aexit__(None, None, None)
@@ -250,8 +394,8 @@ class BillingClient:
                     self._blocked_keys.add(key)
                     from .decorators import _mask_api_key
 
-                    self._logger.warning(
-                        f"API Key 被阻止: {_mask_api_key(key)}, 原因: {reason}"
+                    self._logger.info(
+                        f"API Key 被阻止: {_mask_api_key(key)}, 原因: {reason or '未知'}"
                     )
                 elif status == "ok":
                     # 添加到有效 keys 中，从阻止列表移除
@@ -275,26 +419,11 @@ class BillingClient:
         Args:
             usage_data: 用量数据对象，包含API密钥、模块、模型、用量和元数据
         """
-        if not self._is_connected or self._client is None:
-            raise RuntimeError("未连接到 MQTT 代理")
-
-        message = {
-            "api_key": usage_data.api_key,
-            "module": usage_data.module,
-            "model": usage_data.model,
-            "usage": usage_data.usage,
-            "timestamp": int(time.time() * 1000),  # 毫秒时间戳
-        }
-
-        if usage_data.metadata:
-            message["metadata"] = usage_data.metadata
-
-        try:
-            await self._client.publish("billing/report", json.dumps(message))
-            self._logger.info(f"用量上报成功: {usage_data.model} - {usage_data.usage}")
-        except Exception as e:
-            self._logger.error(f"用量上报失败: {e}")
-            raise
+        # 将数据放入队列，由队列消费者处理（队列无限大小，不会失败）
+        self._usage_queue.put_nowait(usage_data)
+        self._logger.debug(
+            f"用量数据已加入队列: {usage_data.model} - {usage_data.usage}"
+        )
 
     def is_key_valid(self, api_key: str) -> bool:
         """检查 API Key 是否有效"""
@@ -307,6 +436,49 @@ class BillingClient:
     def get_blocked_keys(self) -> set[str]:
         """获取当前被阻止的 API Keys"""
         return self._blocked_keys.copy()
+
+    def get_queue_status(self) -> dict[str, Any]:
+        """获取队列状态信息"""
+        return {
+            "queue_size": self._usage_queue.qsize(),
+            "queue_maxsize": None,  # 无限队列
+            "queue_full": False,  # 无限队列永远不会满
+            "queue_empty": self._usage_queue.empty(),
+            "usage_rate": None,  # 无限队列没有使用率概念
+        }
+
+    def clear_queue(self) -> int:
+        """清空队列，返回清除的数据条数"""
+        count = 0
+        while not self._usage_queue.empty():
+            try:
+                self._usage_queue.get_nowait()
+                self._usage_queue.task_done()
+                count += 1
+            except asyncio.QueueEmpty:
+                break
+
+        self._logger.info(f"已清空队列，清除了 {count} 条数据")
+        return count
+
+    async def wait_queue_empty(self, timeout: float = 30.0) -> bool:
+        """
+        等待队列为空
+
+        Args:
+            timeout: 超时时间（秒）
+
+        Returns:
+            bool: 如果队列在超时前变空返回True，否则返回False
+        """
+        try:
+            await asyncio.wait_for(self._usage_queue.join(), timeout=timeout)
+            return True
+        except TimeoutError:
+            self._logger.warning(
+                f"等待队列清空超时，当前队列大小: {self._usage_queue.qsize()}"
+            )
+            return False
 
     def set_key_status_callback(self, callback: Callable) -> None:
         """设置 Key 状态变化回调函数"""
@@ -321,7 +493,21 @@ class BillingClient:
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         if self._is_connected:
-            asyncio.create_task(self.disconnect())
+            # 在同步上下文中创建任务来断开连接
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self.disconnect())
+            except RuntimeError:
+                # 如果没有运行中的事件循环，创建新的来执行断开连接
+                asyncio.run(self.disconnect())
+
+    async def __aenter__(self) -> "BillingClient":
+        """异步上下文管理器入口"""
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """异步上下文管理器出口"""
+        await self.disconnect()
 
 
 async def report_usage(
@@ -342,14 +528,11 @@ async def report_usage(
         metadata: 元数据字典 (可选)
 
     Raises:
-        RuntimeError: 当 BillingClient 未初始化或未连接时
+        RuntimeError: 当 BillingClient 未初始化时
     """
     client = BillingClient.get_instance()
     if not client:
         raise RuntimeError("BillingClient 尚未初始化，请先初始化 BillingClient")
-
-    if not client.is_connected():
-        raise RuntimeError("BillingClient 未连接，请先调用 connect() 方法")
 
     usage_data = UsageData(
         api_key=api_key,

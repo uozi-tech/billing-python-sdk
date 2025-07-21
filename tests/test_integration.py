@@ -193,7 +193,7 @@ async def test_mock_integration_demo():
                     await client.connect()
                     assert client.is_connected()
 
-                    # 测试多个用量上报
+                    # 测试多个用量上报（现在使用队列方式）
                     usage_data_list = [
                         UsageData("key1", "gpt", "gpt-4", 100, {"tokens": 100}),
                         UsageData("key2", "claude", "claude-3", 200, {"tokens": 200}),
@@ -202,6 +202,15 @@ async def test_mock_integration_demo():
 
                     for usage_data in usage_data_list:
                         await client.report_usage(usage_data)
+
+                    # 验证队列中有3条数据
+                    assert client._usage_queue.qsize() == 3
+
+                    # 手动处理队列中的数据（模拟队列消费者的工作）
+                    while not client._usage_queue.empty():
+                        usage_data = client._usage_queue.get_nowait()
+                        await client._send_usage_data(usage_data)
+                        client._usage_queue.task_done()
 
                     # 验证消息发布
                     assert len(published_messages) == 3
@@ -246,7 +255,7 @@ async def test_concurrent_usage_reporting():
         nonlocal published_count
         published_count += 1
         # 模拟网络延迟
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.01)  # 减少延迟以加快测试
 
     mock_mqtt_client.publish = mock_publish
     mock_mqtt_client.subscribe = AsyncMock()
@@ -266,6 +275,15 @@ async def test_concurrent_usage_reporting():
                     # 并发执行10个上报任务
                     tasks = [report_task(i) for i in range(10)]
                     await asyncio.gather(*tasks)
+
+                    # 验证队列中有10条数据
+                    assert client._usage_queue.qsize() == 10
+
+                    # 手动处理队列中的数据（模拟队列消费者的工作）
+                    while not client._usage_queue.empty():
+                        usage_data = client._usage_queue.get_nowait()
+                        await client._send_usage_data(usage_data)
+                        client._usage_queue.task_done()
 
                     # 验证所有消息都被发布
                     assert published_count == 10

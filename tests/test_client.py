@@ -127,7 +127,8 @@ class TestBillingClient:
         assert client.is_connected()
         mock_mqtt_client.__aenter__.assert_called_once()
         mock_mqtt_client.subscribe.assert_called_once_with("billing/keys/update")
-        mock_create_task.assert_called_once()
+        # 现在会创建3个任务：消息处理、保活、队列消费者
+        assert mock_create_task.call_count == 3
 
     @pytest.mark.asyncio
     async def test_connect_already_connected(self):
@@ -186,69 +187,21 @@ class TestBillingClient:
         assert not client.is_connected()
 
     @pytest.mark.asyncio
-    async def test_report_usage_success(self):
-        """测试成功上报用量"""
+    async def test_report_usage_always_works(self):
+        """测试队列上报不依赖连接状态"""
         with patch.object(BillingClient, "_auto_connect"):
             client = BillingClient("localhost", 8883)
 
-        # 模拟已连接状态
-        mock_mqtt_client = AsyncMock()
-        client._client = mock_mqtt_client
-        client._is_connected = True
-
+        # 即使未连接也能放入队列
         usage_data = UsageData(
-            api_key="test-key",
-            module="gpt",
-            model="gpt-4",
-            usage=100,
-            metadata={"input_tokens": 50, "output_tokens": 50},
+            api_key="test-key", module="gpt", model="gpt-4", usage=100
         )
 
+        # 不应该抛出异常
         await client.report_usage(usage_data)
 
-        # 验证 publish 被调用
-        mock_mqtt_client.publish.assert_called_once()
-        args = mock_mqtt_client.publish.call_args[0]
-        assert args[0] == "billing/report"
-
-        # 验证消息内容
-        message_data = json.loads(args[1])
-        assert message_data["api_key"] == "test-key"
-        assert message_data["module"] == "gpt"
-        assert message_data["model"] == "gpt-4"
-        assert message_data["usage"] == 100
-
-    @pytest.mark.asyncio
-    async def test_report_usage_not_connected(self):
-        """测试未连接时上报用量"""
-        with patch.object(BillingClient, "_auto_connect"):
-            client = BillingClient("localhost", 8883)
-
-        usage_data = UsageData(
-            api_key="test-key", module="gpt", model="gpt-4", usage=100
-        )
-
-        with pytest.raises(RuntimeError, match="未连接到 MQTT 代理"):
-            await client.report_usage(usage_data)
-
-    @pytest.mark.asyncio
-    async def test_report_usage_publish_failure(self):
-        """测试发布失败时的异常处理"""
-        with patch.object(BillingClient, "_auto_connect"):
-            client = BillingClient("localhost", 8883)
-
-        # 模拟已连接状态
-        mock_mqtt_client = AsyncMock()
-        mock_mqtt_client.publish.side_effect = Exception("Publish failed")
-        client._client = mock_mqtt_client
-        client._is_connected = True
-
-        usage_data = UsageData(
-            api_key="test-key", module="gpt", model="gpt-4", usage=100
-        )
-
-        with pytest.raises(Exception, match="Publish failed"):
-            await client.report_usage(usage_data)
+        # 验证数据已在队列中
+        assert client._usage_queue.qsize() == 1
 
     def test_is_key_valid_scenarios(self):
         """测试API Key验证的所有场景"""
@@ -342,6 +295,66 @@ class TestBillingClient:
         assert blocked_keys == {"blocked1", "blocked2"}
         assert blocked_keys is not client._blocked_keys  # 应该是副本
 
+    def test_queue_management_functions(self):
+        """测试队列管理功能"""
+        with patch.object(BillingClient, "_auto_connect"):
+            client = BillingClient("localhost", 8883)
+
+        # 测试初始队列状态
+        status = client.get_queue_status()
+        assert status["queue_size"] == 0
+        assert status["queue_maxsize"] is None
+        assert status["queue_full"] is False
+        assert status["queue_empty"] is True
+        assert status["usage_rate"] is None
+
+        # 添加一些数据到队列
+        usage_data1 = UsageData(api_key="key1", module="llm", model="gpt-4", usage=100)
+        usage_data2 = UsageData(api_key="key2", module="tts", model="voice", usage=50)
+
+        client._usage_queue.put_nowait(usage_data1)
+        client._usage_queue.put_nowait(usage_data2)
+
+        # 测试队列状态更新
+        status = client.get_queue_status()
+        assert status["queue_size"] == 2
+        assert status["queue_empty"] is False
+
+        # 测试清空队列
+        cleared_count = client.clear_queue()
+        assert cleared_count == 2
+        assert client._usage_queue.qsize() == 0
+
+    @pytest.mark.asyncio
+    async def test_wait_queue_empty_success(self):
+        """测试等待队列为空成功"""
+        with patch.object(BillingClient, "_auto_connect"):
+            client = BillingClient("localhost", 8883)
+
+        # 队列已经为空
+        result = await client.wait_queue_empty(timeout=1.0)
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_wait_queue_empty_timeout(self):
+        """测试等待队列为空超时"""
+        with patch.object(BillingClient, "_auto_connect"):
+            client = BillingClient("localhost", 8883)
+
+        # 添加数据到队列但不处理
+        usage_data = UsageData(api_key="key", module="llm", model="gpt-4", usage=100)
+        client._usage_queue.put_nowait(usage_data)
+
+        result = await client.wait_queue_empty(timeout=0.1)
+        assert result is False
+
+    def test_keepalive_interval_fixed(self):
+        """测试保活间隔固定为10秒"""
+        with patch.object(BillingClient, "_auto_connect"):
+            client = BillingClient("localhost", 8883)
+
+        assert client.keepalive_interval == 10
+
 
 @pytest.mark.unit
 class TestReportUsageFunction:
@@ -354,17 +367,12 @@ class TestReportUsageFunction:
 
     @pytest.mark.asyncio
     async def test_report_usage_global_success(self):
-        """测试全局 report_usage 函数成功上报"""
+        """测试全局 report_usage 函数成功上报（队列方式）"""
         # 初始化 billing client
         with patch.object(BillingClient, "_auto_connect"):
             client = BillingClient("localhost", 8883)
 
-        # Mock 连接状态和 report_usage 方法
-        client._is_connected = True
-        mock_report_usage = AsyncMock()
-        client.report_usage = mock_report_usage
-
-        # 调用 report 函数
+        # 调用全局函数
         await report_usage(
             api_key="test-key",
             module="llm",
@@ -373,15 +381,16 @@ class TestReportUsageFunction:
             metadata={"test": "data"},
         )
 
-        # 验证 report_usage 被调用
-        mock_report_usage.assert_called_once()
-        usage_data = mock_report_usage.call_args[0][0]
-        assert isinstance(usage_data, UsageData)
-        assert usage_data.api_key == "test-key"
-        assert usage_data.module == "llm"
-        assert usage_data.model == "gpt-4"
-        assert usage_data.usage == 100
-        assert usage_data.metadata == {"test": "data"}
+        # 验证数据已在队列中
+        assert client._usage_queue.qsize() == 1
+
+        # 验证队列中的数据
+        queued_data = client._usage_queue.get_nowait()
+        assert queued_data.api_key == "test-key"
+        assert queued_data.module == "llm"
+        assert queued_data.model == "gpt-4"
+        assert queued_data.usage == 100
+        assert queued_data.metadata == {"test": "data"}
 
     @pytest.mark.asyncio
     async def test_report_usage_not_initialized(self):
@@ -390,28 +399,15 @@ class TestReportUsageFunction:
             await report_usage("test-key", "llm", "gpt-4", 100)
 
     @pytest.mark.asyncio
-    async def test_report_usage_not_connected(self):
-        """测试全局 report_usage 在 BillingClient 未连接时的错误"""
-        with patch.object(BillingClient, "_auto_connect"):
-            BillingClient("localhost", 8883)
-
-        with pytest.raises(RuntimeError, match="BillingClient 未连接"):
-            await report_usage("test-key", "llm", "gpt-4", 100)
-
-    @pytest.mark.asyncio
     async def test_report_usage_minimal_params(self):
         """测试全局 report_usage 函数最小参数"""
         with patch.object(BillingClient, "_auto_connect"):
             client = BillingClient("localhost", 8883)
 
-        client._is_connected = True
-        mock_report_usage = AsyncMock()
-        client.report_usage = mock_report_usage
-
         # 只使用必需参数
         await report_usage("test-key", "llm", "gpt-4", 100)
 
-        # 验证调用
-        mock_report_usage.assert_called_once()
-        usage_data = mock_report_usage.call_args[0][0]
-        assert usage_data.metadata is None
+        # 验证队列中的数据
+        assert client._usage_queue.qsize() == 1
+        queued_data = client._usage_queue.get_nowait()
+        assert queued_data.metadata is None
