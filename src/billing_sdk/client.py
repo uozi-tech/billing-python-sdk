@@ -74,6 +74,17 @@ class BillingClient:
         # 控制任务运行的标志
         self._should_stop = False
 
+        # 重连控制
+        self._reconnecting = False  # 防止并发重连
+        self._last_reconnect_time = 0.0  # 上次重连时间
+        self._reconnect_delay = 5.0  # 重连间隔（秒）
+        self._max_reconnect_attempts = 3  # 最大重连尝试次数
+        self._reconnect_attempts = 0  # 当前重连尝试次数
+
+        # 连接健康检查
+        self._last_heartbeat_success = time.time()
+        self._connection_timeout = 30.0  # 连接超时时间（秒）
+
         # 标记为已初始化
         BillingClient._initialized = True
 
@@ -128,14 +139,85 @@ class BillingClient:
 
     def is_connected(self) -> bool:
         """检查是否已连接"""
-        return self._is_connected
+        return self._is_connected and self._client is not None
+
+    def _should_reconnect(self) -> bool:
+        """检查是否应该重连"""
+        current_time = time.time()
+
+        # 检查重连频率限制
+        if current_time - self._last_reconnect_time < self._reconnect_delay:
+            return False
+
+        # 检查重连尝试次数
+        if self._reconnect_attempts >= self._max_reconnect_attempts:
+            # 重置重连计数器，增加延迟
+            if current_time - self._last_reconnect_time > self._reconnect_delay * 2:
+                self._reconnect_attempts = 0
+                return True
+            return False
+
+        return True
+
+    async def _reconnect_with_backoff(self) -> bool:
+        """带退避策略的重连"""
+        if self._reconnecting:
+            return False
+
+        if not self._should_reconnect():
+            return False
+
+        self._reconnecting = True
+        self._last_reconnect_time = time.time()
+        self._reconnect_attempts += 1
+
+        try:
+            self._logger.warning(
+                f"检测到连接断开，尝试重新连接... (尝试 {self._reconnect_attempts}/{self._max_reconnect_attempts})"
+            )
+
+            # 先清理旧连接
+            await self._cleanup_connection()
+
+            # 重新连接
+            await self.connect()
+
+            # 重连成功，重置计数器
+            self._reconnect_attempts = 0
+            self._logger.info("重连成功")
+            return True
+
+        except Exception as e:
+            self._logger.error(f"重连失败: {e}")
+            return False
+        finally:
+            self._reconnecting = False
+
+    async def _cleanup_connection(self) -> None:
+        """清理现有连接"""
+        self._is_connected = False
+        if self._client:
+            try:
+                await self._client.__aexit__(None, None, None)
+            except Exception as e:
+                self._logger.debug(f"清理连接时出现异常: {e}")
+            finally:
+                self._client = None
 
     async def connect(self) -> None:
         """连接到 MQTT 代理（默认使用 TLS）"""
         async with self._lock:
-            if self._is_connected:
-                self._logger.info("BillingClient 已经连接，跳过重复连接")
-                return
+            if self._is_connected and self._client is not None:
+                # 进行更严格的连接检查
+                try:
+                    # 尝试发送一个简单的ping消息来验证连接
+                    test_msg = {"type": "ping", "timestamp": int(time.time() * 1000)}
+                    await self._client.publish("billing/ping", json.dumps(test_msg))
+                    self._logger.debug("连接验证成功，跳过重复连接")
+                    return
+                except Exception as e:
+                    self._logger.warning(f"连接验证失败: {e}，将重新建立连接")
+                    await self._cleanup_connection()
 
             try:
                 # 创建 TLS 上下文
@@ -157,6 +239,7 @@ class BillingClient:
                 # 启动连接
                 await self._client.__aenter__()
                 self._is_connected = True
+                self._last_heartbeat_success = time.time()
 
                 self._logger.info("已通过 TLS 连接到 MQTT 代理")
 
@@ -171,8 +254,7 @@ class BillingClient:
 
             except Exception as e:
                 self._logger.error(f"连接 MQTT 代理失败: {e}")
-                self._is_connected = False
-                self._client = None
+                await self._cleanup_connection()
                 raise
 
     async def _request_keys_list(self) -> None:
@@ -239,14 +321,23 @@ class BillingClient:
                 if self._should_stop:
                     break
 
-                # 检查连接状态
+                # 更严格的连接状态检查
+                current_time = time.time()
+                connection_lost = False
+
                 if not self._is_connected or self._client is None:
-                    self._logger.warning("检测到连接断开，尝试重新连接...")
-                    try:
-                        await self.connect()
-                    except Exception as e:
-                        self._logger.error(f"重新连接失败: {e}")
-                        continue
+                    connection_lost = True
+                elif (
+                    current_time - self._last_heartbeat_success
+                    > self._connection_timeout
+                ):
+                    self._logger.warning("心跳超时，认为连接已断开")
+                    connection_lost = True
+
+                if connection_lost:
+                    # 尝试重连
+                    await self._reconnect_with_backoff()
+                    continue
 
                 # 发送心跳消息
                 try:
@@ -258,7 +349,8 @@ class BillingClient:
                         await self._client.publish(
                             "billing/heartbeat", json.dumps(heartbeat_msg)
                         )
-                        self._logger.debug("发送心跳消息")
+                        self._last_heartbeat_success = current_time
+                        self._logger.debug("发送心跳消息成功")
                 except Exception as e:
                     self._logger.warning(f"发送心跳消息失败: {e}")
                     self._is_connected = False
@@ -286,7 +378,7 @@ class BillingClient:
                     continue
 
                 # 确保连接存在
-                if not self._is_connected or self._client is None:
+                if not self.is_connected():
                     # 如果连接断开，将数据放回队列头部
                     await self._usage_queue.put(usage_data)
                     await asyncio.sleep(1)
@@ -304,6 +396,8 @@ class BillingClient:
                     await self._usage_queue.put(usage_data)
                     self._usage_queue.task_done()
                     self._logger.error(f"上报用量失败: {e}")
+                    # 标记连接可能有问题
+                    self._is_connected = False
                     await asyncio.sleep(1)
 
             except asyncio.CancelledError:
@@ -316,7 +410,7 @@ class BillingClient:
 
     async def _send_usage_data(self, usage_data: UsageData) -> None:
         """实际发送用量数据到MQTT"""
-        if not self._is_connected or self._client is None:
+        if not self.is_connected() or self._client is None:
             raise RuntimeError("未连接到 MQTT 代理")
 
         message = {
