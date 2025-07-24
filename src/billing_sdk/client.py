@@ -56,9 +56,9 @@ class BillingClient:
         self._client: AioMQTTClient | None = None
         self._is_connected = False
         # 用于缓存有效的 API keys，从 MQTT 推送中动态更新
-        self._valid_keys: set[str] = set()
+        self._valid_keys: dict[str, str] = {}  # {api_key: app_id}
         # 用于缓存被阻止的 API keys
-        self._blocked_keys: set[str] = set()
+        self._blocked_keys: dict[str, str] = {}  # {api_key: app_id}
         self._key_status_callback: Callable | None = None
         # 使用自定义 logger 或默认 logger
         self._logger = logger or logging.getLogger(__name__)
@@ -413,7 +413,11 @@ class BillingClient:
         if not self.is_connected() or self._client is None:
             raise RuntimeError("未连接到 MQTT 代理")
 
+        if not self.is_key_valid(usage_data.api_key):
+            raise RuntimeError(f"API Key {usage_data.api_key} 无效")
+
         message = {
+            "app_id": self._valid_keys[usage_data.api_key],
             "api_key": usage_data.api_key,
             "module": usage_data.module,
             "model": usage_data.model,
@@ -478,30 +482,34 @@ class BillingClient:
             )
 
             for update in updates:
-                key = update.get("key")
+                app_id = update.get("app_id")
+                api_key = update.get("api_key")
                 status = update.get("status")
                 reason = update.get("reason", "")
 
                 if status == "blocked":
                     # 从有效 keys 中移除被阻止的 key，添加到阻止列表
-                    self._valid_keys.discard(key)
-                    self._blocked_keys.add(key)
+                    if api_key in self._valid_keys:
+                        del self._valid_keys[api_key]
+                    self._blocked_keys[api_key] = app_id
                     from .decorators import _mask_api_key
 
                     self._logger.info(
-                        f"API Key 被阻止: {_mask_api_key(key)}, 原因: {reason or '未知'}"
+                        f"API Key 被阻止: {_mask_api_key(api_key)}, 原因: {reason or '未知'}"
                     )
                 elif status == "ok":
                     # 添加到有效 keys 中，从阻止列表移除
-                    self._valid_keys.add(key)
-                    self._blocked_keys.discard(key)
+                    self._valid_keys[api_key] = app_id
+
+                    if api_key in self._blocked_keys:
+                        del self._blocked_keys[api_key]
                     from .decorators import _mask_api_key
 
-                    self._logger.info(f"API Key 状态正常: {_mask_api_key(key)}")
+                    self._logger.info(f"API Key 状态正常: {_mask_api_key(api_key)}")
 
                 # 调用回调函数
                 if self._key_status_callback:
-                    await self._key_status_callback(key, status, reason)
+                    await self._key_status_callback(api_key, status, reason)
 
         except Exception as e:
             self._logger.error(f"处理 Key 状态更新时出错: {e}")
@@ -522,14 +530,6 @@ class BillingClient:
     def is_key_valid(self, api_key: str) -> bool:
         """检查 API Key 是否有效"""
         return api_key in self._valid_keys
-
-    def get_valid_keys(self) -> set[str]:
-        """获取当前有效的 API Keys"""
-        return self._valid_keys.copy()
-
-    def get_blocked_keys(self) -> set[str]:
-        """获取当前被阻止的 API Keys"""
-        return self._blocked_keys.copy()
 
     def get_queue_status(self) -> dict[str, Any]:
         """获取队列状态信息"""

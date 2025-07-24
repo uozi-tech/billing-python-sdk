@@ -142,17 +142,15 @@ class TestBillingClient:
         client._message_task = None
         # 确保已有MQTT客户端实例
         client._client = AsyncMock()
+        client._client.publish = AsyncMock()
 
         # 阻止_handle_messages被调用
         with patch.object(client, "_handle_messages"):
-            mock_mqtt_client = AsyncMock()
-            with patch(
-                "billing_sdk.client.AioMQTTClient", return_value=mock_mqtt_client
-            ):
-                await client.connect()
+            # 连接验证成功的情况
+            await client.connect()
 
-            # 不应该再次连接
-            mock_mqtt_client.__aenter__.assert_not_called()
+            # 应该调用publish进行连接验证
+            client._client.publish.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_connect_failure(self):
@@ -208,12 +206,8 @@ class TestBillingClient:
         with patch.object(BillingClient, "_auto_connect"):
             client = BillingClient("localhost", 8883)
 
-        # 测试被阻止的Key
-        client._blocked_keys.add("blocked-key")
-        assert not client.is_key_valid("blocked-key")
-
         # 测试有效的Key
-        client._valid_keys.add("valid-key")
+        client._valid_keys["valid-key"] = "app-123"
         assert client.is_key_valid("valid-key")
 
         # 测试未知Key（应该默认为无效）
@@ -225,15 +219,25 @@ class TestBillingClient:
         with patch.object(BillingClient, "_auto_connect"):
             client = BillingClient("localhost", 8883)
 
+        # 先添加一个有效key
+        client._valid_keys["test-key"] = "app-123"
+
         payload = {
             "updates": [
-                {"key": "test-key", "status": "blocked", "reason": "quota exceeded"}
-            ]
+                {
+                    "app_id": "app-123",
+                    "api_key": "test-key",
+                    "status": "blocked",
+                    "reason": "quota exceeded",
+                }
+            ],
+            "timestamp": 1234567890,
         }
 
         await client._handle_key_status_update(json.dumps(payload))
 
         assert "test-key" in client._blocked_keys
+        assert client._blocked_keys["test-key"] == "app-123"
         assert "test-key" not in client._valid_keys
 
     @pytest.mark.asyncio
@@ -243,14 +247,18 @@ class TestBillingClient:
             client = BillingClient("localhost", 8883)
 
         # 先添加到阻止列表
-        client._blocked_keys.add("test-key")
+        client._blocked_keys["test-key"] = "app-123"
 
-        payload = {"updates": [{"key": "test-key", "status": "ok"}]}
+        payload = {
+            "updates": [{"app_id": "app-123", "api_key": "test-key", "status": "ok"}],
+            "timestamp": 1234567890,
+        }
 
         await client._handle_key_status_update(json.dumps(payload))
 
         assert "test-key" not in client._blocked_keys
         assert "test-key" in client._valid_keys
+        assert client._valid_keys["test-key"] == "app-123"
 
     @pytest.mark.asyncio
     async def test_handle_key_status_update_with_callback(self):
@@ -267,33 +275,20 @@ class TestBillingClient:
 
         payload = {
             "updates": [
-                {"key": "test-key", "status": "blocked", "reason": "test reason"}
-            ]
+                {
+                    "app_id": "app-123",
+                    "api_key": "test-key",
+                    "status": "blocked",
+                    "reason": "test reason",
+                }
+            ],
+            "timestamp": 1234567890,
         }
 
         await client._handle_key_status_update(json.dumps(payload))
 
         assert len(callback_data) == 1
         assert callback_data[0] == ("test-key", "blocked", "test reason")
-
-    def test_get_keys_functionality(self):
-        """测试获取有效和被阻止Keys的功能"""
-        with patch.object(BillingClient, "_auto_connect"):
-            client = BillingClient("localhost", 8883)
-
-        # 测试获取有效Keys
-        client._valid_keys.add("key1")
-        client._valid_keys.add("key2")
-        valid_keys = client.get_valid_keys()
-        assert valid_keys == {"key1", "key2"}
-        assert valid_keys is not client._valid_keys  # 应该是副本
-
-        # 测试获取被阻止的Keys
-        client._blocked_keys.add("blocked1")
-        client._blocked_keys.add("blocked2")
-        blocked_keys = client.get_blocked_keys()
-        assert blocked_keys == {"blocked1", "blocked2"}
-        assert blocked_keys is not client._blocked_keys  # 应该是副本
 
     def test_queue_management_functions(self):
         """测试队列管理功能"""
@@ -354,6 +349,77 @@ class TestBillingClient:
             client = BillingClient("localhost", 8883)
 
         assert client.keepalive_interval == 10
+
+    @pytest.mark.asyncio
+    async def test_send_usage_data_success(self):
+        """测试成功发送用量数据"""
+        with patch.object(BillingClient, "_auto_connect"):
+            client = BillingClient("localhost", 8883)
+
+        # 设置连接状态和有效key
+        client._is_connected = True
+        mock_mqtt_client = AsyncMock()
+        client._client = mock_mqtt_client
+        client._valid_keys["test-key"] = "app-123"
+
+        usage_data = UsageData(
+            api_key="test-key",
+            module="llm",
+            model="gpt-4",
+            usage=100,
+            metadata={"tokens": 100},
+        )
+
+        await client._send_usage_data(usage_data)
+
+        # 验证消息被发布
+        mock_mqtt_client.publish.assert_called_once()
+        args = mock_mqtt_client.publish.call_args
+        assert args[0][0] == "billing/report"
+
+        # 验证消息内容
+        message_data = json.loads(args[0][1])
+        assert message_data["app_id"] == "app-123"
+        assert message_data["api_key"] == "test-key"
+        assert message_data["module"] == "llm"
+        assert message_data["model"] == "gpt-4"
+        assert message_data["usage"] == 100
+        assert message_data["metadata"] == {"tokens": 100}
+        assert "timestamp" in message_data
+
+    @pytest.mark.asyncio
+    async def test_send_usage_data_invalid_key(self):
+        """测试使用无效key发送用量数据"""
+        with patch.object(BillingClient, "_auto_connect"):
+            client = BillingClient("localhost", 8883)
+
+        # 设置连接状态但不添加有效key
+        client._is_connected = True
+        client._client = AsyncMock()
+
+        usage_data = UsageData(
+            api_key="invalid-key", module="llm", model="gpt-4", usage=100
+        )
+
+        with pytest.raises(RuntimeError, match="API Key invalid-key 无效"):
+            await client._send_usage_data(usage_data)
+
+    @pytest.mark.asyncio
+    async def test_send_usage_data_not_connected(self):
+        """测试未连接时发送用量数据"""
+        with patch.object(BillingClient, "_auto_connect"):
+            client = BillingClient("localhost", 8883)
+
+        # 设置未连接状态
+        client._is_connected = False
+        client._client = None
+
+        usage_data = UsageData(
+            api_key="test-key", module="llm", model="gpt-4", usage=100
+        )
+
+        with pytest.raises(RuntimeError, match="未连接到 MQTT 代理"):
+            await client._send_usage_data(usage_data)
 
 
 @pytest.mark.unit

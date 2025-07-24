@@ -193,6 +193,11 @@ async def test_mock_integration_demo():
                     await client.connect()
                     assert client.is_connected()
 
+                    # 设置有效的API keys用于测试
+                    client._valid_keys["key1"] = "app-1"
+                    client._valid_keys["key2"] = "app-2"
+                    client._valid_keys["key3"] = "app-3"
+
                     # 测试多个用量上报（现在使用队列方式）
                     usage_data_list = [
                         UsageData("key1", "gpt", "gpt-4", 100, {"tokens": 100}),
@@ -224,6 +229,7 @@ async def test_mock_integration_demo():
                         assert data["module"] == expected.module
                         assert data["model"] == expected.model
                         assert data["usage"] == expected.usage
+                        assert data["app_id"] == client._valid_keys[expected.api_key]
                         assert "timestamp" in data
 
                     # 测试断开连接
@@ -265,6 +271,10 @@ async def test_concurrent_usage_reporting():
             with patch.object(client, "_handle_messages"):
                 with patch.object(client, "_request_keys_list"):
                     await client.connect()
+
+                    # 设置有效的API keys
+                    for i in range(10):
+                        client._valid_keys[f"key-{i}"] = f"app-{i}"
 
                     # 创建多个并发的用量上报任务
                     async def report_task(i):

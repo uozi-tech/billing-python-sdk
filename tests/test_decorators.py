@@ -60,7 +60,7 @@ class TestRequireApiKeyDecorator:
         with patch.object(BillingClient, "_auto_connect"):
             client = BillingClient("localhost", 8883)
 
-        client._valid_keys.add("valid_key")
+        client._valid_keys["valid_key"] = "app-123"
 
         class TestService:
             @require_api_key
@@ -106,7 +106,7 @@ class TestRequireApiKeyDecorator:
         with patch.object(BillingClient, "_auto_connect"):
             client = BillingClient("localhost", 8883)
 
-        client._blocked_keys.add("blocked_key")
+        client._blocked_keys["blocked_key"] = "app-456"
         # 停用消息处理任务避免警告
         client._message_task = None
 
@@ -153,7 +153,7 @@ class TestRequireApiKeyDecorator:
         with patch.object(BillingClient, "_auto_connect"):
             client = BillingClient("localhost", 8883)
 
-        client._valid_keys.add("valid_key")
+        client._valid_keys["valid_key"] = "app-123"
         # 停用消息处理任务避免警告
         client._message_task = None
 
@@ -185,7 +185,7 @@ class TestRequireApiKeyDecorator:
         with patch.object(BillingClient, "_auto_connect"):
             client = BillingClient("localhost", 8883)
 
-        client._valid_keys.add("valid_key")
+        client._valid_keys["valid_key"] = "app-123"
 
         class TestService:
             @require_api_key
@@ -212,7 +212,7 @@ class TestRequireApiKeyDecorator:
         with patch.object(BillingClient, "_auto_connect"):
             client = BillingClient("localhost", 8883)
 
-        client._valid_keys.add("valid_key")
+        client._valid_keys["valid_key"] = "app-123"
 
         class TestService:
             @require_api_key
